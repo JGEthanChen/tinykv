@@ -160,7 +160,9 @@ func (rn *RawNode) Ready() Ready {
 	rd := Ready{
 		Entries:          r.RaftLog.unstableEntries(),
 		CommittedEntries: r.RaftLog.nextEnts(),
-		Messages:         r.msgs,
+	}
+	if len(r.msgs) > 0 {
+		rd.Messages = r.msgs
 	}
 	softSt := r.softState()
 	hardSt := r.hardState()

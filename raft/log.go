@@ -94,7 +94,7 @@ func (l *RaftLog) maybeCompact() {
 
 // Entries return one entry slice from [lo,hi)
 func (l *RaftLog) Entries(lo, hi uint64) ([]pb.Entry,error) {
-	if lo >= hi || hi>l.LastIndex()+1 {
+	if lo > hi || hi>l.LastIndex()+1 {
 		return nil, ErrCompacted
 	}
 	ents := make([]pb.Entry, 0)
