@@ -1326,7 +1326,7 @@ func (m *RaftResponseHeader) GetCurrentTerm() uint64 {
 }
 
 type RaftCmdRequest struct {
-	Header *RaftRequestHeader `protobuf:"bytes,1,opt,name=header" json:"header,omitempty"`
+	Header *RaftRequestHeader `protobuf:"bytes,;.1,opt,name=header" json:"header,omitempty"`
 	// We can't enclose normal requests and administrator request
 	// at same time.
 	Requests             []*Request    `protobuf:"bytes,2,rep,name=requests" json:"requests,omitempty"`

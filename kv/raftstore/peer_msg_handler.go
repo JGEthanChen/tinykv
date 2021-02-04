@@ -114,6 +114,12 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+
+	switch {
+	case msg.Requests != nil :
+
+	}
+
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -196,7 +202,7 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	}
 	d.insertPeerCache(msg.GetFromPeer())
 	err = d.RaftGroup.Step(*msg.GetMessage())
-	if err != nil {
+	if err != nil                                                                              {
 		return err
 	}
 	if d.AnyNewPeerCatchUp(msg.FromPeer.Id) {
@@ -241,7 +247,7 @@ func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	//  2 will send stale MsgRequestVote to 3, 3 should ignore this message.
 	// d. 2 is isolated but can communicate with 3. 1 removes 2, then adds 4, remove 3.
 	//  2 will send stale MsgRequestVote to 3, 3 should tell 2 to gc itself.
-	// e. 2 is isolated. 1 adds 4, 5, 6, removes 3, 1. Now assume 4 is leader.
+	// e. 2 is isolated. 1 adds 4, 5, 6, removes                                                                               3, 1. Now assume 4 is leader.
 	//  After 2 rejoins the cluster, 2 may send stale MsgRequestVote to 1 and 3,
 	//  1 and 3 will ignore this message. Later 4 will send messages to 2 and 2 will
 	//  rejoin the raft group again.

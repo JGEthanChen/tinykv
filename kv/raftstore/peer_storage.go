@@ -92,7 +92,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	}
 	buf := make([]eraftpb.Entry, 0, high-low)
 	nextIndex := low
-	txn := ps.Engines.Raft.NewTransaction(false)
+	txn := ps.Engines.Raft.NewTransaction( false)
 	defer txn.Discard()
 	startKey := meta.RaftLogKey(ps.region.Id, low)
 	endKey := meta.RaftLogKey(ps.region.Id, high)
@@ -127,7 +127,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 }
 
 func (ps *PeerStorage) Term(idx uint64) (uint64, error) {
-	if idx == ps.truncatedIndex() {
+	if idx == ps.truncatedIndex()            {
 		return ps.truncatedTerm(), nil
 	}
 	if err := ps.checkRange(idx, idx+1); err != nil {
@@ -308,6 +308,40 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	//var err error
+	entrySize := len(entries)
+	if entrySize>0 {
+		lastIndex, err := ps.LastIndex()
+		if err != nil {
+			return err
+		}
+		firstIndex,err := ps.FirstIndex()
+		if err != nil {
+			return err
+		}
+
+
+		if ps.raftState.LastTerm == 0 && lastIndex == meta.RaftInitLogIndex && firstIndex == meta.RaftInitLogIndex+1 {
+			ps.raftState.LastIndex = entries[entrySize-1].GetIndex()
+			firstIndex = entries[0].Index
+		}
+		//Append the entry after firstIndex
+		for i :=0; i<entrySize; i++ {
+			if entries[i].Index >= firstIndex {
+				raftWB.SetMeta(meta.RaftLogKey(ps.region.GetId(),entries[i].Index), &entries[i])
+			}
+		}
+
+		//delete the log that will never be uploaded
+		for idx :=entries[entrySize-1].Index+1; idx<=lastIndex; idx++ {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), idx))
+		}
+
+		ps.raftState.LastIndex = entries[entrySize-1].GetIndex()
+		ps.raftState.LastTerm = entries[entrySize-1].GetTerm()
+
+	}
+
 	return nil
 }
 
@@ -331,6 +365,15 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
+	wb := new(engine_util.WriteBatch)
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+		wb.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
+	}
+
+	ps.Append(ready.Entries, wb)
+	wb.WriteToDB(ps.Engines.Raft)
+
 	return nil, nil
 }
 

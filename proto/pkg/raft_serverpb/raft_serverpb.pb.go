@@ -159,7 +159,7 @@ func (m *RaftMessage) GetEndKey() []byte {
 // Used to store the persistent state for Raft, including the hard state for raft and the last index of the raft log.
 type RaftLocalState struct {
 	HardState            *eraftpb.HardState `protobuf:"bytes,1,opt,name=hard_state,json=hardState" json:"hard_state,omitempty"`
-	LastIndex            uint64             `protobuf:"varint,2,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
+	LastIndex            uint64                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           `protobuf:"varint,2,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
 	LastTerm             uint64             `protobuf:"varint,3,opt,name=last_term,json=lastTerm,proto3" json:"last_term,omitempty"`
 	XXX_NoUnkeyedLiteral struct{}           `json:"-"`
 	XXX_unrecognized     []byte             `json:"-"`

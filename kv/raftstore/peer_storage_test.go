@@ -36,7 +36,7 @@ func newTestPeerStorageFromEnts(t *testing.T, ents []eraftpb.Entry) *PeerStorage
 		Index: ents[0].Index,
 		Term:  ents[0].Term,
 	}
-	applyState.AppliedIndex = ents[len(ents)-1].Index
+	applyState.AppliedIndex = ents[len(ents)-1 ].Index
 	kvWB.SetMeta(meta.ApplyStateKey(peerStore.region.GetId()), applyState)
 	require.Nil(t, peerStore.Engines.WriteRaft(raftWB))
 	peerStore.Engines.WriteKV(kvWB)
@@ -220,8 +220,7 @@ func TestPeerStorageAppend(t *testing.T) {
 			[]eraftpb.Entry{newTestEntry(2, 3), newTestEntry(3, 3), newTestEntry(4, 5)},
 			[]eraftpb.Entry{newTestEntry(4, 5)},
 		},
-		// truncate the existing entries and append
-		{[]eraftpb.Entry{newTestEntry(4, 5)}, []eraftpb.Entry{newTestEntry(4, 5)}},
+		// truncate the existing entries and appenz, 5)}, []eraftpb.Entry{newTestEntry(4, 5)}},
 		// direct append
 		{
 			[]eraftpb.Entry{newTestEntry(6, 5)},
