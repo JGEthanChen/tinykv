@@ -39,13 +39,34 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
+	//fmt.Println("Handle raft ready start")
 	if d.stopped {
 		return
 	}
 	// Your Code Here (2B).
+	if !d.RaftGroup.HasReady() {
+		return
+	}
+	rd := d.RaftGroup.Ready()
+	//fmt.Println(len(rd.CommittedEntries))
+	applySnapRes,err := d.peerStorage.SaveReadyState(&rd)
+
+	if err != nil {
+		panic(err)
+	}
+	if applySnapRes != nil {
+
+	}
+	d.Send(d.ctx.trans, rd.Messages)
+	proposalHandler := newProposalHandler(d, rd.CommittedEntries)
+	fmt.Println("Start proposal")
+	proposalHandler.HandleProposal()
+	d.RaftGroup.Advance(rd)
+
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
+	//fmt.Println("Handling")
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
@@ -54,6 +75,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
+		//fmt.Printf("Raft command %v",raftCMD.Request.Requests[0].CmdType)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
 		d.onTick()
@@ -95,7 +117,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	err := util.CheckRegionEpoch(req, d.Region(), true)
 	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
 		// Attach the region which might be split from the current region. But it doesn't
-		// matter if the region is not split from the current region. If the region meta
+		// matter if the region is   not split from the current region. If the region meta
 		// received by the TiKV driver is newer than the meta cached in the driver, the meta is
 		// updated.
 		siblingRegion := d.findSiblingRegion()
@@ -105,6 +127,50 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 		return errEpochNotMatching
 	}
 	return err
+}
+
+
+//propose the normal request in the RaftCmdRequest
+func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	reqs := msg.Requests
+
+	//check the key in reqs
+	if err := d.checkKeyInRequests(reqs);err != nil{
+		cb.Done(ErrResp(err))
+		//fmt.Println("key no")
+		return
+
+	}
+
+	//check if the read and write only has one
+	if err := d.checkSingleOption(reqs);err != nil {
+		panic(err)
+	}
+
+	data,err := msg.Marshal()
+	if err != nil {
+		panic(err)
+	}
+
+	//fmt.Println("Yeah")
+
+	d.proposals = append(d.proposals, &proposal{
+		index: d.nextProposalIndex(),
+		term: d.Term(),
+		cb: cb,
+	})
+
+	if err := d.RaftGroup.Propose(data); err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+
+
+	fmt.Printf("proposal term index %v %v", d.nextProposalIndex(),d.Term())
+}
+
+func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+
 }
 
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
@@ -117,7 +183,11 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 
 	switch {
 	case msg.Requests != nil :
-
+		fmt.Println("Normal requests")
+		d.proposeRequest(msg,cb)
+	case msg.AdminRequest != nil:
+		fmt.Println("Admin requests")
+		d.proposeAdminRequest(msg,cb)
 	}
 
 }
@@ -168,8 +238,8 @@ func (d *peerMsgHandler) ScheduleCompactLog(firstIndex uint64, truncatedIndex ui
 }
 
 func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
-	log.Debugf("%s handle raft message %s from %d to %d",
-		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
+	//log.Debugf("%s handle raft message %s from %d to %d",
+		//d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
 		return nil
 	}
@@ -475,6 +545,47 @@ func (d *peerMsgHandler) onPrepareSplitRegion(regionEpoch *metapb.RegionEpoch, s
 		Peer:     d.Meta,
 		Callback: cb,
 	}
+}
+// check the key in requests
+func (d *peerMsgHandler) checkKeyInRequests(reqs []*raft_cmdpb.Request ) error {
+	for _,req := range reqs {
+		//find the key
+		var key []byte = nil
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Delete:
+			key = req.Delete.Key
+		case raft_cmdpb.CmdType_Get:
+			key = req.Get.Key
+		case raft_cmdpb.CmdType_Put:
+			key = req.Put.Key
+		}
+		if key != nil {
+			err := util.CheckKeyInRegion(key, d.Region())
+			if err != nil {
+				return err
+			}
+		}
+
+	}
+	return nil
+}
+
+//check if the write or read only has one
+func (d *peerMsgHandler) checkSingleOption(reqs []*raft_cmdpb.Request ) error {
+	readFlag,writeFlag := false, false
+	for _,req := range reqs {
+		if req.CmdType == raft_cmdpb.CmdType_Get {
+			readFlag = true
+		} else {
+			writeFlag = true
+		}
+	}
+	if writeFlag && readFlag {
+		err := errors.Errorf("Write and read command should not in one requests")
+		log.Error(err)
+		return err
+	}
+	return nil
 }
 
 func (d *peerMsgHandler) validateSplitRegion(epoch *metapb.RegionEpoch, splitKey []byte) error {

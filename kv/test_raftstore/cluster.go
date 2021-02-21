@@ -347,6 +347,7 @@ func (c *Cluster) MustDeleteCF(cf string, key []byte) {
 		panic(resp.Header.Error)
 	}
 	if len(resp.Responses) != 1 {
+		//fmt.Printf("\n%v\n",len(resp.Responses))
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Delete {
@@ -364,6 +365,7 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 			panic(resp.Header.Error)
 		}
 		if len(resp.Responses) != 1 {
+			//fmt.Printf("\n%v\n",len(resp.Responses))
 			panic("len(resp.Responses) != 1")
 		}
 		if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap {

@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"math/rand"
 	"sort"
@@ -245,9 +246,21 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 }
 
-//send snapshot
-func (r *Raft) sendSnapshot(to uint64) {
+//send snapshot response
+func (r *Raft) sendSnapshotResponse(to uint64, index uint64) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		Term:r.Term,
+		To: to,
+		Index: index,
+	}
+	r.msgs = append(r.msgs, msg)
+	return
+}
 
+//send Snapshot
+func (r *Raft) sendSnapshot(to uint64) {
+	return
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -481,7 +494,8 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgAppend:
 			r.handleAppendEntries(m)
-
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
 		}
 	case StateCandidate:
 		switch m.MsgType {
@@ -503,6 +517,9 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleHeartbeat(m)
 		case pb.MessageType_MsgRequestVoteResponse:
 			r.handleRequestVoteResponse(m)
+		case pb.MessageType_MsgSnapshot:
+			r.becomeFollower(m.Term, m.From)
+			r.handleSnapshot(m)
 		}
 
 	case StateLeader:
@@ -700,7 +717,8 @@ func (r *Raft) handleMsgPropose(entries []*pb.Entry) {
 	lastIndex := r.RaftLog.LastIndex()
 	for i, entry := range entries {
 		entry.Term = r.Term
-		entry.Index = lastIndex + uint64(i) + 1
+		entry.Index = lastIndex + uint64(i) +1
+		fmt.Printf("enrty term index %v %v", entry.Term,entry.Index)
 		if entry.EntryType == pb.EntryType_EntryConfChange {
 			if r.PendingConfIndex != None {
 				continue
@@ -836,6 +854,26 @@ func (r *Raft) hardState() pb.HardState {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.Snapshot == nil {
+		//snap is empty
+		return
+	}
+	metaData := m.Snapshot.Metadata
+	logTerm,err := r.RaftLog.Term(metaData.Index)
+	if err != nil {
+		panic(err)
+	}
+	if logTerm == metaData.Term {
+		r.sendSnapshotResponse(m.From, r.RaftLog.committed)
+	}
+	r.Prs = make(map[uint64]*Progress)
+	for _, node := range metaData.ConfState.Nodes {
+		r.Prs[node] = &Progress{}
+	}
+	r.RaftLog.committed = metaData.Index
+	r.RaftLog.entries = nil
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.sendSnapshotResponse(m.From, r.RaftLog.LastIndex())
 }
 
 // addNode add a new node to raft group
