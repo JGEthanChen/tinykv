@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
@@ -31,21 +33,31 @@ func (h *proposalHandler)HandleProposal() {
 		return
 	}
 	for _,entry := range h.Entries {
-		msg := &raft_cmdpb.RaftCmdRequest{}
-		if err := msg.Unmarshal(entry.Data);err != nil {
-			panic(err)
-		}
-		switch {
-		case h.stopped == true:
-			//fmt.Println("Stop")
-			return
-		case msg.AdminRequest != nil:
-			h.handleAdminRequest(msg, &entry)
-		case len(msg.Requests) > 0:
-			//fmt.Println("handle req")
-			h.handleRequest(msg, &entry)
-		case entry.EntryType == pb.EntryType_EntryConfChange:
+		if entry.EntryType == pb.EntryType_EntryConfChange {
+			// case that the entry is for Conf change
+			log.Infof("[Region: %d] %d store: %d apply conf change entry", h.peer.regionId,h.peer.Meta.StoreId,h.peer.Meta.Id)
+			confInfo := & pb.ConfChange{}
+			if err := confInfo.Unmarshal(entry.GetData()); err != nil {
+				panic(err)
+			}
+			h.preApplyConfChange(confInfo)
+			h.RaftGroup.ApplyConfChange(*confInfo)
 
+		} else {
+			//case that entry is msg
+			msg := &raft_cmdpb.RaftCmdRequest{}
+			if err := msg.Unmarshal(entry.GetData());err != nil {
+				panic(err)
+			}
+
+			switch {
+			case h.stopped == true:
+				return
+			case msg.AdminRequest != nil:
+				h.handleAdminRequest(msg, &entry)
+			case len(msg.Requests) > 0:
+				h.handleRequest(msg, &entry)
+			}
 		}
 	}
 	kvWB := new(engine_util.WriteBatch)
@@ -55,8 +67,56 @@ func (h *proposalHandler)HandleProposal() {
 	return
 }
 
-func (h *proposalHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, entry *pb.Entry) {
+//refresh and persist the RegionState before raftgroup ApplyConfChange
+func (h *proposalHandler) preApplyConfChange(change *pb.ConfChange) {
+	//Get the peer info first
+	var context peerContext
+	err := context.Unmarshal(change.Context)
+	if err != nil {
+		log.Errorf("%v Get context error!", h.Tag)
+		return
+	}
 
+	switch change.GetChangeType() {
+	case pb.ConfChangeType_AddNode:
+
+	case pb.ConfChangeType_RemoveNode:
+	}
+
+}
+
+func (h *proposalHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, entry *pb.Entry) {
+	log.Infof("[Region: %d] %d store: %d apply admin msg: %v",msg.Header.RegionId,msg.Header.Peer.Id, msg.Header.Peer.StoreId, msg.AdminRequest.CmdType)
+	adReq := msg.AdminRequest
+	//resp := newCmdResp()
+	//cb,ok := h.checkProposalCb(entry)
+	//if ok == false {
+		//return
+	//}
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		h.handleCompactLog(adReq)
+	}
+}
+
+func(h *proposalHandler) handleCompactLog(adReq *raft_cmdpb.AdminRequest) {
+	compactLog := adReq.GetCompactLog()
+	kvWb := new(engine_util.WriteBatch)
+	truncatedSt := h.peerStorage.applyState.TruncatedState
+	fmt.Printf("\ncompact log %v %v\n" , truncatedSt.Index, compactLog.CompactIndex)
+	if truncatedSt.Index <= compactLog.CompactIndex {
+		truncatedSt.Index = compactLog.CompactIndex
+		truncatedSt.Term = compactLog.CompactTerm
+		kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
+		kvWb.WriteToDB(h.peerStorage.Engines.Kv)
+		h.LastCompactedIdx = truncatedSt.Index + 1
+		h.ctx.raftLogGCTaskSender <- &runner.RaftLogGCTask{
+			RaftEngine: h.ctx.engine.Raft,
+			RegionID: h.regionId,
+			StartIdx: h.LastCompactedIdx,
+			EndIdx: h.LastCompactedIdx,
+		}
+	}
 }
 
 func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *pb.Entry) {
@@ -75,9 +135,10 @@ func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *p
 	resp := newCmdResp()
 	for _,req := range reqs {
 		//write command should be persisted first
-		//fmt.Printf("\ncmd %v", req.CmdType)
+		fmt.Printf("\ncmd %v peer %v \n", req.CmdType,h.Meta.Id)
 		switch req.CmdType {
 		case raft_cmdpb.CmdType_Put:
+			fmt.Printf("Put data: %v",req.Put.Value)
 			kvWb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
 		case raft_cmdpb.CmdType_Delete:
 			kvWb.DeleteCF(req.Delete.Cf, req.Delete.Key)
@@ -122,7 +183,6 @@ func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *p
 		}
 	}
 	if cb != nil {
-		//fmt.Printf("cb %v", reqs[0].CmdType)
 		cb.Done(resp)
 	}
 
@@ -132,22 +192,22 @@ func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *p
 func (h *proposalHandler) checkProposalCb(entry *pb.Entry) (*message.Callback,bool) {
 	for {
 		if len(h.proposals) == 0 {
-			fmt.Println("no proposal1")
+			//fmt.Println("no proposal1")
 			return nil,false
 		}
 		proposal := h.proposals[0]
 		h.proposals = h.proposals[1:]
 
 		if proposal.term > entry.Term {
-			fmt.Println("no proposal2")
+			//fmt.Println("no proposal2")
 			return nil,false
 		}
 
 		if proposal.index == entry.Index && proposal.term == entry.Term{
-			fmt.Println("ture proposal")
+			//fmt.Println("ture proposal")
 			return proposal.cb,true
 		}
-		fmt.Println("stale proposal")
+		//fmt.Println("stale proposal")
 		NotifyStaleReq(entry.Term, proposal.cb)
 	}
 }

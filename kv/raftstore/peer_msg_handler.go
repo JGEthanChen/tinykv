@@ -2,6 +2,8 @@ package raftstore
 
 import (
 	"fmt"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -26,6 +28,28 @@ const (
 	PeerTickSchedulerHeartbeat PeerTick = 3
 )
 
+//contain a peer, use for filling into confchange msg
+type peerContext struct {
+	*metapb.Peer
+}
+
+func (pc *peerContext) Marshal() ([]byte,error){
+	data := make([]byte, pc.Peer.Size())
+	_,err := pc.Peer.MarshalTo(data)
+	return data,err
+}
+
+func (pc *peerContext) Unmarshal(data []byte) error {
+	var peer metapb.Peer
+	err := peer.Unmarshal(data)
+	if err != nil {
+		return err
+	}
+	pc.Peer = &peer
+	return nil
+}
+
+
 type peerMsgHandler struct {
 	*peer
 	ctx *GlobalContext
@@ -39,7 +63,7 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
-	//fmt.Println("Handle raft ready start")
+	log.Infof("Handling raftready id: %v\n", d.Meta.Id)
 	if d.stopped {
 		return
 	}
@@ -48,34 +72,43 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	rd := d.RaftGroup.Ready()
-	//fmt.Println(len(rd.CommittedEntries))
 	applySnapRes,err := d.peerStorage.SaveReadyState(&rd)
 
 	if err != nil {
 		panic(err)
 	}
-	if applySnapRes != nil {
 
+	//TODO check the condition
+	if applySnapRes != nil {
+		if !reflect.DeepEqual(applySnapRes.PrevRegion, applySnapRes.Region) {
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.regions[applySnapRes.Region.Id] = applySnapRes.Region
+			storeMeta.regionRanges.Delete(&regionItem{region: applySnapRes.PrevRegion})
+			storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: applySnapRes.Region})
+			storeMeta.Unlock()
+		}
 	}
 	d.Send(d.ctx.trans, rd.Messages)
 	proposalHandler := newProposalHandler(d, rd.CommittedEntries)
-	fmt.Println("Start proposal")
 	proposalHandler.HandleProposal()
 	d.RaftGroup.Advance(rd)
 
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
-	//fmt.Println("Handling")
+
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
+		log.Infof(" %s handle raft message %s from %d to %d, MsgType: %v" ,
+			d.Tag, raftMsg.GetMessage().GetMsgType(), raftMsg.GetFromPeer().GetId(), raftMsg.GetToPeer().GetId(),raftMsg.Message.MsgType)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
-		//fmt.Printf("Raft command %v",raftCMD.Request.Requests[0].CmdType)
+		log.Infof("[Region %d]RaftCmd: %v Peerid: %v\n",raftCMD.Request.Requests[0].CmdType, d.Meta.Id, raftCMD.Request.Header.RegionId)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
 		d.onTick()
@@ -137,7 +170,6 @@ func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 	//check the key in reqs
 	if err := d.checkKeyInRequests(reqs);err != nil{
 		cb.Done(ErrResp(err))
-		//fmt.Println("key no")
 		return
 
 	}
@@ -151,9 +183,7 @@ func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 	if err != nil {
 		panic(err)
 	}
-
 	//fmt.Println("Yeah")
-
 	d.proposals = append(d.proposals, &proposal{
 		index: d.nextProposalIndex(),
 		term: d.Term(),
@@ -164,12 +194,95 @@ func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 		cb.Done(ErrResp(err))
 		return
 	}
+	//fmt.Printf("proposal term index %v %v", d.nextProposalIndex(),d.Term())
+}
 
-
-	fmt.Printf("proposal term index %v %v", d.nextProposalIndex(),d.Term())
+//TODO replace here
+func adminConfChangeResp(cmd raft_cmdpb.AdminCmdType, cb *message.Callback, desc string) {
+	if cb != nil {
+		if cmd == raft_cmdpb.AdminCmdType_ChangePeer {
+			log.Debugf(`%s and resp`, desc)
+		}
+		resp := newCmdResp()
+		resp.AdminResponse = &raft_cmdpb.AdminResponse{
+			CmdType: cmd,
+		}
+		switch cmd {
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			resp.AdminResponse.ChangePeer = &raft_cmdpb.ChangePeerResponse{}
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+			resp.AdminResponse.TransferLeader = &raft_cmdpb.TransferLeaderResponse{}
+		}
+		cb.Done(resp)
+	} else {
+		log.Infof(desc)
+	}
 }
 
 func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	switch msg.GetAdminRequest().GetCmdType() {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		data,err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		/*
+		d.proposals = append(d.proposals, &proposal{
+			index: d.nextProposalIndex(),
+			term: d.Term(),
+			cb:cb,
+		})
+		*/
+		if err = d.RaftGroup.Propose(data);err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		transferLeaderRequest := msg.GetAdminRequest().GetTransferLeader()
+		d.RaftGroup.TransferLeader(transferLeaderRequest.GetPeer().GetId())
+		adminConfChangeResp(msg.GetAdminRequest().GetCmdType(), cb, fmt.Sprintf(`%s proposeRaftCommandTransferLeader(%d)`, d.Tag, transferLeaderRequest.GetPeer().GetId()))
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		if d.RaftGroup.Raft.PendingConfIndex > 0 {
+			str := fmt.Sprintf(`%s %d proposeRaftCommandChangePeer err:ConfChange was doing.should commit latter.`,  d.Tag, d.Meta.GetId())
+			adminConfChangeResp(msg.GetAdminRequest().GetCmdType(), cb, str)
+			return
+		}
+
+		changePeerRequest := msg.GetAdminRequest().GetChangePeer()
+
+		//leader receive the msg that remove it self
+		if changePeerRequest.GetChangeType() == pb.ConfChangeType_RemoveNode && changePeerRequest.GetPeer().GetId() == d.Meta.GetId() {
+			//choose the proper follower peer to replace
+			replacePeer := d.getProperPeer()
+			if replacePeer == nil {
+				return
+			}
+			d.RaftGroup.TransferLeader(replacePeer.GetId())
+			str := fmt.Sprintf(`%s %d proposeRaftCommandChangePeer,remove leader self .should first transfer leader to(%s) and return `,
+				d.Tag, d.Meta.GetId(), replacePeer)
+			adminConfChangeResp(msg.GetAdminRequest().GetCmdType(), cb, str)
+			return
+		}
+
+		//drive the raft propose Conf change
+		context := &peerContext{changePeerRequest.GetPeer()}
+		data,err := context.Marshal()
+		if err != nil {
+			str := fmt.Sprintf(`%s %d proposeRaftCommandChangePeer err:%s`,
+				d.Tag, d.Meta.GetId(), err.Error())
+			adminConfChangeResp(msg.GetAdminRequest().GetCmdType(), cb, str)
+			return
+		}
+
+		confChange := pb.ConfChange{
+			ChangeType: changePeerRequest.GetChangeType(),
+			NodeId: changePeerRequest.GetPeer().GetId(),
+			Context: data,
+		}
+
+		d.RaftGroup.ProposeConfChange(confChange)
+		adminConfChangeResp(msg.GetAdminRequest().GetCmdType(), cb, fmt.Sprintf(`%s %d proposeRaftCommandChangePeer(%v,%d)`, d.Tag, d.Meta.GetId(), changePeerRequest.GetChangeType(), changePeerRequest.GetPeer().GetId()))
+	}
 
 }
 
@@ -180,14 +293,13 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
-
 	switch {
-	case msg.Requests != nil :
-		fmt.Println("Normal requests")
-		d.proposeRequest(msg,cb)
-	case msg.AdminRequest != nil:
-		fmt.Println("Admin requests")
+	case msg.GetAdminRequest() != nil:
+		//fmt.Println("Admin requests")
 		d.proposeAdminRequest(msg,cb)
+	case len(msg.Requests) > 0 :
+		//fmt.Println("Normal requests")
+		d.proposeRequest(msg,cb)
 	}
 
 }
@@ -238,8 +350,8 @@ func (d *peerMsgHandler) ScheduleCompactLog(firstIndex uint64, truncatedIndex ui
 }
 
 func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
-	//log.Debugf("%s handle raft message %s from %d to %d",
-		//d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
+	log.Debugf ("%s handle raft message %s from %d to %d",
+		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
 		return nil
 	}
@@ -272,7 +384,8 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	}
 	d.insertPeerCache(msg.GetFromPeer())
 	err = d.RaftGroup.Step(*msg.GetMessage())
-	if err != nil                                                                              {
+	if err != nil {
+		//fmt.Printf("msg type %v", msg.Message.MsgType)
 		return err
 	}
 	if d.AnyNewPeerCatchUp(msg.FromPeer.Id) {

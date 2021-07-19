@@ -86,6 +86,7 @@ func IsRaftStateKey(key []byte) bool {
 	return len(key) == 11 && key[0] == LocalPrefix && key[1] == RegionRaftPrefix
 }
 
+//Get region id and the suffix
 func DecodeRegionMetaKey(key []byte) (uint64, byte, error) {
 	if len(RegionMetaMinKey)+8+1 != len(key) {
 		return 0, 0, errors.Errorf("invalid region meta key length for key %v", key)

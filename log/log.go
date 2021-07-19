@@ -266,7 +266,11 @@ func LogTypeToString(t LogType) (string, string) {
 }
 
 func New() *Logger {
-	return NewLogger(os.Stderr, "")
+	file,err := os.OpenFile("tmp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	return NewLogger(io.MultiWriter(file, os.Stderr), "")
 }
 
 func NewLogger(w io.Writer, prefix string) *Logger {

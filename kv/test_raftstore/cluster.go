@@ -55,8 +55,13 @@ func (c *Cluster) Start() {
 	ctx := context.TODO()
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
+	//To avoid the huge log records in tmp, which is generating by pre test
+	_ = os.RemoveAll("./tmp")
+	_ = os.Mkdir("./tmp", 0755|os.ModeDir)
+
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
-		dbPath, err := ioutil.TempDir("", "test-raftstore")
+		//dbPath, err := ioutil.TempDir("", "test-raftstore")
+		dbPath, err := ioutil.TempDir("./tmp", "test-raftstore")
 		if err != nil {
 			panic(err)
 		}
@@ -79,7 +84,6 @@ func (c *Cluster) Start() {
 		if err != nil {
 			panic(err)
 		}
-
 		raftDB := engine_util.CreateDB(raftPath, true)
 		kvDB := engine_util.CreateDB(kvPath, false)
 		engine := engine_util.NewEngines(kvDB, raftDB, kvPath, raftPath)
@@ -188,6 +192,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
 		if resp == nil {
 			// it should be timeouted innerly
+			fmt.Println("Request time out!")
 			SleepMS(100)
 			continue
 		}
@@ -219,7 +224,8 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		request.Header.Peer = leader
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
-			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)
+			//Debugf
+			fmt.Printf("can't call command %s on leader %d of region %d\n", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
 			if leader == newLeader {
 				region, _, err := c.schedulerClient.GetRegionByID(context.TODO(), regionID)
@@ -228,10 +234,12 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 				}
 				peers := region.GetPeers()
 				leader = peers[rand.Int()%len(peers)]
-				log.Debugf("leader info maybe wrong, use random leader %d of region %d", leader.GetId(), regionID)
+				//log.Debugf
+				fmt.Printf("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
 			} else {
 				leader = newLeader
-				log.Debugf("use new leader %d of region %d", leader.GetId(), regionID)
+				//log.Debugf
+				fmt.Printf("use new leader %d of region %d\n", leader.GetId(), regionID)
 			}
 			continue
 		}

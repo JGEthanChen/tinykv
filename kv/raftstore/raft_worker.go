@@ -45,7 +45,7 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 		for i := 0; i < pending; i++ {
 			msgs = append(msgs, <-rw.raftCh)
 		}
-		peerStateMap := make(map[uint64]*peerState)
+		peerStateMap := make(map[uint64]*peerState) //record peers which receive msg
 		for _, msg := range msgs {
 			peerState := rw.getPeerState(peerStateMap, msg.RegionID)
 			if peerState == nil {
@@ -59,6 +59,8 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 	}
 }
 
+//get the peer from map first,
+//if not exists, add it from router
 func (rw *raftWorker) getPeerState(peersMap map[uint64]*peerState, regionID uint64) *peerState {
 	peer, ok := peersMap[regionID]
 	if !ok {

@@ -390,3 +390,12 @@ func (p *peer) sendRaftMessage(msg eraftpb.Message, trans Transport) error {
 	sendMsg.Message = &msg
 	return trans.Send(sendMsg)
 }
+
+func (nd *peer) getProperPeer() *metapb.Peer {
+	id := nd.RaftGroup.Raft.GetProperFollower()
+	if id==0 {
+		log.Warnf("%v get proper peer Failed", nd.Tag)
+		return nil
+	}
+	return nd.getPeerFromCache(id)
+}
