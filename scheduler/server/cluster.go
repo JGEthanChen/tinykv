@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path"
@@ -279,8 +280,126 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
+	storedRegion := c.GetRegion(region.GetID())
 
+	//TODO Check the split condition, how region id change
+
+	// No region found, means the region in core maybe split into several pieces
+	if storedRegion == nil {
+		// No limit , set limit = -1
+		regionList := c.ScanRegions(region.GetStartKey(),region.GetEndKey(),-1)
+
+		// Check all regions if the heartbeat msg is stale
+		for _, curRegion := range regionList {
+			// Msg is stale, skip directly
+			if !c.checkRegionStale(region, curRegion) {
+				return ErrRegionIsStale(region.GetMeta(), curRegion.GetMeta())
+			}
+		}
+
+		// As msg is not stale ,remove overlap regions, then update
+		for _,curRegion := range regionList {
+			c.removeRegion(curRegion)
+		}
+
+		err := c.putRegion(region)
+		if err != nil {
+			return err
+		}
+
+		for storeId,_ := range region.GetStoreIds() {
+			c.updateStoreStatusLocked(storeId)
+		}
+		return nil
+	}
+
+	// storedRegion is found, then check the conf_ver and version
+	// If the region received is stale, skip that
+	if !c.checkRegionStale(region, storedRegion) {
+		return ErrRegionIsStale(region.GetMeta(), storedRegion.GetMeta())
+	}
+
+	// Check the region received whether it need update
+	if c.checkMustUpdate(region, storedRegion) {
+		// func putRegion in core will remove original region first, so just calling put func is ok
+		c.putRegion(region)
+		for storeId,_ := range region.GetStoreIds() {
+			c.updateStoreStatusLocked(storeId)
+		}
+	}
 	return nil
+}
+
+// checkMustUpdate determines whether the regionInfo received must update
+func (c *RaftCluster) checkMustUpdate(recvRegion, curRegion *core.RegionInfo) bool {
+	// this func is to reduce redundant updates
+	// Below 6 conditions are enough to pass the test, but it may not be sufficient and necessary
+	// In order to guarantee the correctness, this function return true default, and return false only when not satisfy all conditions
+	// 1. Leader changed
+	// 2. ApproximateSize changed
+	// 3. New one's version or conf_ver is greater than the original one
+	// 4. If the new one or original one has pending peer
+	// 5. Peer changed
+	// 6. Start key or End key not the same
+	if recvRegion.GetLeader().GetId() == curRegion.GetLeader().GetId() &&
+			recvRegion.GetApproximateSize() == curRegion.GetApproximateSize() &&
+			recvRegion.GetRegionEpoch().GetVersion() <= curRegion.GetRegionEpoch().GetVersion() &&
+			recvRegion.GetRegionEpoch().GetConfVer() <= curRegion.GetRegionEpoch().GetConfVer() &&
+			len(recvRegion.GetPendingPeers()) == 0 &&
+			len(curRegion.GetPendingPeers()) == 0 &&
+			bytes.Equal(recvRegion.GetStartKey(), curRegion.GetStartKey()) &&
+			bytes.Equal(recvRegion.GetEndKey(), curRegion.GetEndKey()) &&
+			IsPeersEqual(recvRegion.GetLearners(), curRegion.GetLearners()) &&
+			IsPeersEqual(recvRegion.GetVoters(), curRegion.GetVoters()) &&
+			IsPeerEqual(recvRegion.GetLeader(), curRegion.GetLeader()) {
+		return false
+	}
+	return true
+	/*
+	if recvRegion.GetLeader().GetId() != curRegion.GetLeader().GetId() {
+		return true
+	}
+
+	if recvRegion.GetApproximateSize() != curRegion.GetApproximateSize() {
+		return true
+	}
+
+	if recvRegion.GetRegionEpoch().GetVersion() > curRegion.GetRegionEpoch().GetVersion() {
+		return true
+	}
+	if recvRegion.GetRegionEpoch().GetConfVer() > curRegion.GetRegionEpoch().GetConfVer() {
+		return true
+	}
+	if len(recvRegion.GetPendingPeers()) > 0 || len(curRegion.GetPendingPeers()) > 0 {
+		return true
+	}
+	if !bytes.Equal(recvRegion.GetStartKey(), curRegion.GetStartKey()) || !bytes.Equal(recvRegion.GetEndKey(), curRegion.GetEndKey()) {
+		return true
+
+	}
+	if !IsPeersEqual(recvRegion.GetLearners(), curRegion.GetLearners()) {
+		return true
+	}
+	if !IsPeersEqual(recvRegion.GetVoters(), curRegion.GetVoters()) {
+		return true
+	}
+	if !IsPeerEqual(recvRegion.GetLeader(), curRegion.GetLeader()) {
+		return true
+	}
+	return false
+	*/
+}
+
+//checkRegionStale check whether the recvRegion is stale compared with curRegion
+func (c *RaftCluster) checkRegionStale(recvRegion, curRegion *core.RegionInfo) bool {
+	//Your Code Here (3C)
+	if recvRegion.GetRegionEpoch().GetConfVer() < curRegion.GetRegionEpoch().GetConfVer() {
+		return false
+	}
+	if recvRegion.GetRegionEpoch().GetVersion() < curRegion.GetRegionEpoch().GetVersion() {
+		return false
+	}
+	return true
 }
 
 func (c *RaftCluster) updateStoreStatusLocked(id uint64) {
@@ -509,6 +628,15 @@ func (c *RaftCluster) putStore(store *metapb.Store) error {
 		)
 	}
 	return c.putStoreLocked(s)
+}
+
+// removeRegion remove region in core
+// use in 3C
+func (c* RaftCluster) removeRegion(region *core.RegionInfo)  error {
+	c.Lock()
+	defer c.Unlock()
+	c.core.RemoveRegion(region)
+	return nil
 }
 
 // RemoveStore marks a store as offline in cluster.

@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"math/rand"
 	"net/http"
 	"time"
@@ -155,4 +156,36 @@ func InitHTTPClient(svr *Server) error {
 		},
 	}
 	return nil
+}
+
+// IsPeersEqual check whether peers in two peer list are the same
+func IsPeersEqual(peers1, peers2 []*metapb.Peer) bool {
+	if len(peers1) != len(peers2) {
+		return false
+	}
+	// peer id -> bool
+	peerMap := make(map[uint64] bool)
+	for _,peer := range peers1 {
+		peerMap[peer.GetId()] = true
+	}
+	for _,peer := range peers2 {
+		if _,ok := peerMap[peer.GetId()]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+//IsPeerEqual check whether two peers are the same
+func IsPeerEqual(peer1, peer2 *metapb.Peer) bool {
+	if peer1 == nil && peer2 == nil {
+		return true
+	}
+	if peer1 !=nil && peer2 != nil {
+		if peer1.GetId() != peer2.GetId() {
+			return false
+		}
+		return true
+	}
+	return false
 }
