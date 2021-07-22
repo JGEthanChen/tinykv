@@ -124,14 +124,29 @@ func (s *balanceRegionScheduler) transferRegionOut(cluster opt.Cluster, source *
 	var chosenRegion *core.RegionInfo
 	// Get pending region first
 	cluster.GetPendingRegionsWithLock(source.GetID(), func(regionContainer core.RegionsContainer) {
+		// Means choose a random region from all regions in container
 		chosenRegion = regionContainer.RandomRegion([]byte(""), []byte(""))
 	})
 	if op := s.checkTargetOut(cluster, source, targets, chosenRegion); op != nil {
-		return nil
+		return op
 	}
 
-	//
+	// Get the follower region
+	cluster.GetFollowersWithLock(source.GetID(), func(regionContainer core.RegionsContainer) {
+		chosenRegion = regionContainer.RandomRegion([]byte(""), []byte(""))
+	})
+	if op := s.checkTargetOut(cluster, source, targets, chosenRegion); op != nil {
+		return op
+	}
 
+	//Get the leader region
+	cluster.GetLeadersWithLock(source.GetID(), func(regionContainer core.RegionsContainer) {
+		chosenRegion = regionContainer.RandomRegion([]byte(""), []byte(""))
+	})
+	if op := s.checkTargetOut(cluster, source, targets, chosenRegion); op != nil {
+		return op
+	}
+	return nil
 }
 
 // checkTargetOut find a target store to transfer after transferRegionOut get a proper region
@@ -139,14 +154,18 @@ func (s *balanceRegionScheduler) checkTargetOut(cluster opt.Cluster, source *cor
 	allowPending := core.HealthRegionAllowPending()
 	// If get pending region successfully and pending allowed, replicas qualified
 	if chosenRegion != nil && allowPending(chosenRegion) && len(chosenRegion.GetPeers()) == cluster.GetMaxReplicas(){
-		log.Infof("choose pending region: %d",chosenRegion.GetID())
+		log.Infof("choose region: %d",chosenRegion.GetID())
 		filterTargets := s.storesFilterByRegion(chosenRegion, targets)
 		for _,target := range filterTargets {
 			// If the target size can't satisfy the size limit, other bigger target obviously can't satisfy, skip all
 			if source.GetRegionSize() - target.GetRegionSize() < 2*chosenRegion.GetApproximateSize() {
 				break
 			}
-			if op := s.createOperator(cluster, chosenRegion, source, target); op != nil {
+			// If the target is not qualified, check others
+			if !target.IsAvailable() || !target.IsUp() || target.DownTime() > cluster.GetMaxStoreDownTime() {
+				continue
+			}
+ 			if op := s.createOperator(cluster, chosenRegion, source, target); op != nil {
 				log.Infof("choose target successfully target store: %d", target.GetID())
 				return op
 			}
