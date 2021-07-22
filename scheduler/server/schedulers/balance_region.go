@@ -18,6 +18,9 @@ import (
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/opt"
+	"sort"
+	"github.com/pingcap-incubator/tinykv/log"
+	"time"
 )
 
 func init() {
@@ -77,6 +80,105 @@ func (s *balanceRegionScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 
 func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operator {
 	// Your Code Here (3C).
+	sources := cluster.GetStores()
+	sort.Slice(sources, func(i,j int) bool {
+		return sources[i].GetRegionSize() > sources[j].GetRegionSize()
+	})
+	targets := cluster.GetStores()
+	sort.Slice(targets, func(i,j int) bool {
+		return targets[i].GetRegionSize() < targets[j].GetRegionSize()
+	})
 
+	for i := 0; i < len(sources); i++ {
+		source := sources[i]
+		sourceID := source.GetID()
+		log.Infof("Try transfer store: %d", sourceID)
+		// Check if the source is available
+		if !source.IsAvailable() {
+			return nil
+		}
+		// If the source is not up, pick next
+		if !source.IsUp() {
+			return nil
+		}
+		// Check if the time last from lastHeartbeat above MinInterval
+		if time.Now().Sub(source.GetLastHeartbeatTS()).Nanoseconds() > s.GetMinInterval().Nanoseconds() {
+			return nil
+		}
+		// A suitable store's down time cannot be longer than MaxStoreDownTIme of the cluster
+		if source.DownTime() > cluster.GetMaxStoreDownTime() {
+			return nil
+		}
+		// Try to pick target store
+		for j := 0; j < balanceRegionRetryLimit; j++ {
+			if op := s.transferRegionOut(cluster, source, targets); op != nil {
+				return op
+			}
+		}
+	}
 	return nil
 }
+
+// transferRegionOut choose a proper region to transfer
+func (s *balanceRegionScheduler) transferRegionOut(cluster opt.Cluster, source *core.StoreInfo, targets []*core.StoreInfo) *operator.Operator {
+	var chosenRegion *core.RegionInfo
+	// Get pending region first
+	cluster.GetPendingRegionsWithLock(source.GetID(), func(regionContainer core.RegionsContainer) {
+		chosenRegion = regionContainer.RandomRegion([]byte(""), []byte(""))
+	})
+	if op := s.checkTargetOut(cluster, source, targets, chosenRegion); op != nil {
+		return nil
+	}
+
+	//
+
+}
+
+// checkTargetOut find a target store to transfer after transferRegionOut get a proper region
+func (s *balanceRegionScheduler) checkTargetOut(cluster opt.Cluster, source *core.StoreInfo, targets []*core.StoreInfo, chosenRegion *core.RegionInfo) *operator.Operator {
+	allowPending := core.HealthRegionAllowPending()
+	// If get pending region successfully and pending allowed, replicas qualified
+	if chosenRegion != nil && allowPending(chosenRegion) && len(chosenRegion.GetPeers()) == cluster.GetMaxReplicas(){
+		log.Infof("choose pending region: %d",chosenRegion.GetID())
+		filterTargets := s.storesFilterByRegion(chosenRegion, targets)
+		for _,target := range filterTargets {
+			// If the target size can't satisfy the size limit, other bigger target obviously can't satisfy, skip all
+			if source.GetRegionSize() - target.GetRegionSize() < 2*chosenRegion.GetApproximateSize() {
+				break
+			}
+			if op := s.createOperator(cluster, chosenRegion, source, target); op != nil {
+				log.Infof("choose target successfully target store: %d", target.GetID())
+				return op
+			}
+		}
+	}
+	return nil
+}
+
+// storesFilterByRegion filter the stores which contains the region
+func (s *balanceRegionScheduler) storesFilterByRegion(region *core.RegionInfo, stores []*core.StoreInfo) []*core.StoreInfo {
+	var filterStores []*core.StoreInfo
+	for _,store := range stores {
+		// Find the store without peer in this region
+		if region.GetStorePeer(store.GetID()) == nil {
+			filterStores = append(filterStores, store)
+		}
+	}
+	return filterStores
+}
+
+// createOperator create operator to balance the region from store source to store target
+func (s *balanceRegionScheduler) createOperator(cluster opt.Cluster, region *core.RegionInfo, source, target *core.StoreInfo) *operator.Operator{
+	peer, err := cluster.AllocPeer(target.GetID())
+	if err != nil {
+		log.Errorf("Alloc peer failed in createOperator")
+		return nil
+	}
+	op, err := operator.CreateMovePeerOperator("Move Peer", cluster, region, operator.OpBalance, source.GetID(), target.GetID(), peer.GetId())
+	if err != nil {
+		log.Errorf("Create operator failed in createOperator")
+		return nil
+	}
+	return op
+}
+
