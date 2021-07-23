@@ -34,6 +34,7 @@ func (lock *Lock) Info(key []byte) *kvrpcpb.LockInfo {
 	return &info
 }
 
+// Bytes format: Primary...Kind(1)...Ts(8)...TTL(8)
 func (lock *Lock) ToBytes() []byte {
 	buf := append(lock.Primary, byte(lock.Kind))
 	buf = append(buf, make([]byte, 16)...)

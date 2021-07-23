@@ -15,6 +15,7 @@ type Write struct {
 	Kind    WriteKind
 }
 
+// Bytes format: Kind...StartTS(8)
 func (wr *Write) ToBytes() []byte {
 	buf := append([]byte{byte(wr.Kind)}, 0, 0, 0, 0, 0, 0, 0, 0)
 	binary.BigEndian.PutUint64(buf[1:], wr.StartTS)
