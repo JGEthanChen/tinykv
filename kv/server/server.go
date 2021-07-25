@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
 
 	"github.com/pingcap-incubator/tinykv/kv/coprocessor"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
@@ -150,17 +152,211 @@ func (server *Server) Snapshot(stream tinykvpb.TinyKv_SnapshotServer) error {
 // Transactional API.
 func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcpb.GetResponse, error) {
 	// Your Code Here (4B).
-	return nil, nil
+	resp := &kvrpcpb.GetResponse{}
+
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.Version)
+	lock,err := mvccTxn.GetLock(req.Key)
+	if err != nil {
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			return nil, err
+		}
+		return resp, nil
+	}
+	// check if the lock exists, and is locked by other transaction
+	if lock != nil && lock.IsLockedFor(req.Key, mvccTxn.StartTS, resp) {
+		return resp, nil
+	}
+
+	// get the value
+	value,err := mvccTxn.GetValue(req.Key)
+	if err != nil {
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	// value not found
+	if value == nil {
+		resp.NotFound = true
+	} else {
+		resp.Value = value
+	}
+
+	return resp, nil
 }
 
 func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest) (*kvrpcpb.PrewriteResponse, error) {
 	// Your Code Here (4B).
-	return nil, nil
+	resp := &kvrpcpb.PrewriteResponse{}
+
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			return nil, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.StartVersion)
+
+	// Get all keys for latches in one time
+	var keys [][]byte
+
+	for _,m := range req.Mutations {
+		keys = append(keys, m.Key)
+	}
+	server.Latches.WaitForLatches(keys)
+	defer server.Latches.ReleaseLatches(keys)
+
+	// Loop check the lock and write
+	for _,m := range req.Mutations {
+		// check if have write conflict
+		w,commitTImeStamp,err := mvccTxn.MostRecentWrite(m.Key)
+		if err != nil {
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			if len(resp.RegionError.Message) != 0 {
+				return nil, err
+			}
+			return resp, nil
+		}
+		// write conflicts
+		if w != nil && commitTImeStamp >= mvccTxn.StartTS {
+			resp.Errors = append(resp.Errors, &kvrpcpb.KeyError{
+				Conflict: &kvrpcpb.WriteConflict{
+						StartTs: mvccTxn.StartTS,
+						ConflictTs: commitTImeStamp,
+						Key: m.Key,
+						Primary: req.PrimaryLock,
+				},
+			})
+			continue
+		}
+
+		// check if the key is locked
+		lock,err := mvccTxn.GetLock(m.Key)
+		if err != nil {
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			if len(resp.RegionError.Message) != 0 {
+				return nil, err
+			}
+			return resp, nil
+		}
+		if lock != nil {
+			resp.Errors = append(resp.Errors, &kvrpcpb.KeyError{Locked: lock.Info(m.Key)})
+			continue
+		}
+
+		mvccTxn.PutLock(m.Key, &mvcc.Lock{
+			Primary: req.PrimaryLock,
+			Ts: mvccTxn.StartTS,
+			Ttl: req.LockTtl,
+			Kind: mvcc.WriteKindFromProto(m.Op),
+		})
+
+		// lock the key, and write the value
+		switch m.Op {
+		case kvrpcpb.Op_Put:
+			mvccTxn.PutValue(m.Key, m.Value)
+		case kvrpcpb.Op_Del:
+			mvccTxn.DeleteValue(m.Key)
+		}
+	}
+
+	// no key error, the write to storage
+	if len(resp.Errors) == 0 {
+		err = server.storage.Write(req.Context, mvccTxn.Writes())
+		if err != nil {
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			if len(resp.RegionError.Message) != 0 {
+				return nil, err
+			}
+			return resp, nil
+		}
+	}
+	return resp, nil
 }
 
 func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*kvrpcpb.CommitResponse, error) {
 	// Your Code Here (4B).
-	return nil, nil
+
+	resp := &kvrpcpb.CommitResponse{}
+
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	server.Latches.WaitForLatches(req.Keys)
+	defer server.Latches.ReleaseLatches(req.Keys)
+
+	for _,key := range req.Keys {
+		lock,err := mvccTxn.GetLock(key)
+		if err != nil {
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			if len(resp.RegionError.Message) != 0 {
+				resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+				return resp, err
+			}
+			return resp, nil
+		}
+		// lock not found or keys are locked by other transactions
+		if lock == nil {
+			// situation that rolling back should be processed silently
+			//resp.Error = &kvrpcpb.KeyError{Retryable: "Lock not found."}
+			return resp, nil
+		} else if lock.Ts != mvccTxn.StartTS {
+			resp.Error = &kvrpcpb.KeyError{Retryable: "Keys are locked by other transaction."}
+			return resp, nil
+		}
+		// generate the write, and write into storage
+		mvccTxn.PutWrite(key, req.CommitVersion, &mvcc.Write{
+			Kind: lock.Kind,
+			StartTS: req.StartVersion,
+		})
+		mvccTxn.DeleteLock(key)
+	}
+
+	// write into storage if no error occurred
+	if err := server.storage.Write(req.Context, mvccTxn.Writes()); err != nil {
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+			return resp, err
+		}
+		return resp, nil
+	}
+	return resp, nil
 }
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
