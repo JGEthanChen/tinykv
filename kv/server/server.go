@@ -2,13 +2,12 @@ package server
 
 import (
 	"context"
-	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
-	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
-
 	"github.com/pingcap-incubator/tinykv/kv/coprocessor"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/latches"
+	"github.com/pingcap-incubator/tinykv/kv/transaction/mvcc"
 	coppb "github.com/pingcap-incubator/tinykv/proto/pkg/coprocessor"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
@@ -361,22 +360,296 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	resp := &kvrpcpb.ScanResponse{}
+
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.Version)
+	it := mvcc.NewScanner(req.StartKey, mvccTxn)
+	defer it.Close()
+	for it.NextByIter(); it.Valid() && it.Count() <= req.Limit; it.NextByIter() {
+		item := it.Item()
+		// if have region err or other err, return resp directly
+		if item.RegionError() != nil {
+			resp.RegionError = item.RegionError()
+			return resp, nil
+		}
+		resp.Pairs = append(resp.Pairs, &kvrpcpb.KvPair{
+			Error: &kvrpcpb.KeyError{
+				Locked: item.KeyError().Locked,
+			},
+			Key: mvcc.DecodeUserKey(item.Key()),
+			Value: item.Value(),
+		})
+	}
+	return resp, nil
 }
 
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	resp := &kvrpcpb.CheckTxnStatusResponse{}
+
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.LockTs)
+	lock,err := mvccTxn.GetLock(req.PrimaryKey)
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	if lock != nil && lock.Ts == mvccTxn.StartTS {
+		if mvcc.PhysicalTime(lock.Ts) + lock.Ttl >= mvcc.PhysicalTime(req.CurrentTs) {
+			// lock is not exhausted, return ttl info
+			resp.Action = kvrpcpb.Action_NoAction
+			resp.LockTtl = lock.Ttl
+			return resp, nil
+		} else {
+			// roll back the primary key
+			resp.Action = kvrpcpb.Action_TTLExpireRollback
+			if lock.Kind == mvcc.WriteKindPut {
+				mvccTxn.DeleteValue(req.PrimaryKey)
+			}
+			mvccTxn.DeleteLock(req.PrimaryKey)
+			mvccTxn.PutWrite(req.PrimaryKey, mvccTxn.StartTS, &mvcc.Write{
+				Kind: mvcc.WriteKindRollback,
+				StartTS: mvccTxn.StartTS,
+			})
+			err := server.storage.Write(req.Context, mvccTxn.Writes())
+			if err != nil {
+				// change error into region error
+				resp.RegionError = util.RaftstoreErrToPbError(err)
+				// the error is not a region error, return error string
+				if len(resp.RegionError.Message) != 0 {
+					return resp, err
+				}
+			}
+			return resp, nil
+		}
+
+	}
+
+	//lock is nil, the transaction has previously been rolled back or committed
+	resp.Action = kvrpcpb.Action_NoAction
+	w, cts, err := mvccTxn.CurrentWrite(req.PrimaryKey)
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			return resp, err
+		}
+		return resp, nil
+	}
+	// if no write, then generate rollback write
+	if w == nil {
+		resp.Action = kvrpcpb.Action_LockNotExistRollback
+		mvccTxn.PutWrite(req.PrimaryKey, mvccTxn.StartTS, &mvcc.Write{
+			Kind: mvcc.WriteKindRollback,
+			StartTS: mvccTxn.StartTS,
+		})
+		err := server.storage.Write(req.Context, mvccTxn.Writes())
+		if err != nil {
+			// change error into region error
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			// the error is not a region error, return error string
+			if len(resp.RegionError.Message) != 0 {
+				return resp, err
+			}
+		}
+	}
+	// if transaction has already rolled back, commitversion is empty
+	if w != nil && w.Kind != mvcc.WriteKindRollback{
+		resp.CommitVersion = cts
+	}
+	return resp, nil
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+
+	resp := &kvrpcpb.BatchRollbackResponse{}
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	server.Latches.WaitForLatches(req.Keys)
+	defer server.Latches.ReleaseLatches(req.Keys)
+
+	for _,key := range req.Keys {
+		lock, err := mvccTxn.GetLock(key)
+		if err != nil {
+			// change error into region error
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			// the error is not a region error, return error string
+			if len(resp.RegionError.Message) != 0 {
+				resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+				return resp, err
+			}
+			return resp, nil
+		}
+
+		// locked by other transaction
+		if lock != nil && lock.Ts != mvccTxn.StartTS {
+			//resp.Error = &kvrpcpb.KeyError{Locked: lock.Info(key)}
+			//return resp, nil
+			mvccTxn.PutWrite(key, mvccTxn.StartTS, &mvcc.Write{
+				StartTS: req.StartVersion,
+				Kind: mvcc.WriteKindRollback,
+			})
+		}
+
+		if lock == nil {
+			w, _, err := mvccTxn.CurrentWrite(key)
+			if err != nil {
+				resp.RegionError = util.RaftstoreErrToPbError(err)
+				if len(resp.RegionError.Message) != 0 {
+					resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+					return resp, err
+				}
+				return resp, nil
+			}
+
+			if w == nil {
+				// prewrite missing
+				mvccTxn.PutWrite(key, req.StartVersion, &mvcc.Write{
+					StartTS: req.StartVersion,
+					Kind:    mvcc.WriteKindRollback,
+				})
+			} else if w != nil  && w.Kind != mvcc.WriteKindRollback{
+				// case that write has already commit
+				resp.Error = &kvrpcpb.KeyError{Abort: "Can't roll back a transaction that has already committed."}
+				return resp, nil
+			}
+
+		}
+
+		// roll back the value
+		if lock != nil && lock.Ts == mvccTxn.StartTS {
+			if lock.Kind == mvcc.WriteKindPut {
+				mvccTxn.DeleteValue(key)
+			}
+			mvccTxn.DeleteLock(key)
+			mvccTxn.PutWrite(key, req.StartVersion, &mvcc.Write{
+				StartTS: req.StartVersion,
+				Kind: mvcc.WriteKindRollback,
+			})
+		}
+	}
+
+	if err := server.storage.Write(req.Context, mvccTxn.Writes()); err != nil {
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	return resp, nil
 }
 
-func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
+func (server *Server) KvResolveLock(context context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	resp := &kvrpcpb.ResolveLockResponse{}
+	// Get the reader
+	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	mvccTxn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	pairs, err := mvcc.AllLocksForTxn(mvccTxn)
+	if err != nil {
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = &kvrpcpb.KeyError{Abort: "A fatal error occurred."}
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	var keys [][]byte
+	for _,pair := range pairs {
+		keys = append(keys, pair.Key)
+	}
+
+	if req.CommitVersion == 0 {
+		// roll back all the keys
+		rbResp,err := server.KvBatchRollback(context, &kvrpcpb.BatchRollbackRequest{
+			Context: req.Context,
+			StartVersion: req.StartVersion,
+			Keys: keys,
+		})
+		if err != nil {
+			return resp, err
+		}
+		resp.RegionError = rbResp.RegionError
+		resp.Error = rbResp.Error
+	} else {
+		// commit keys
+		commitResp,err := server.KvCommit(context, &kvrpcpb.CommitRequest{
+			Context: req.Context,
+			StartVersion: req.StartVersion,
+			CommitVersion: req.CommitVersion,
+			Keys: keys,
+		})
+		if err != nil {
+			return resp, err
+		}
+		resp.RegionError = commitResp.RegionError
+		resp.Error = commitResp.Error
+	}
+
+	return resp, nil
 }
 
 // SQL push down commands.
