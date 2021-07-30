@@ -35,7 +35,7 @@ func (h *proposalHandler)HandleProposal() {
 	for _,entry := range h.Entries {
 		if entry.EntryType == pb.EntryType_EntryConfChange {
 			// case that the entry is for Conf change
-			log.Infof("[Region: %d] %d store: %d apply conf change entry", h.peer.regionId,h.peer.Meta.StoreId,h.peer.Meta.Id)
+			log.Infof(" %s %d store: %d apply conf change entry", h.Tag,h.peer.Meta.StoreId,h.peer.Meta.Id)
 			confInfo := & pb.ConfChange{}
 			if err := confInfo.Unmarshal(entry.GetData()); err != nil {
 				panic(err)
@@ -135,10 +135,8 @@ func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *p
 	resp := newCmdResp()
 	for _,req := range reqs {
 		//write command should be persisted first
-		fmt.Printf("\ncmd %v peer %v \n", req.CmdType,h.Meta.Id)
 		switch req.CmdType {
 		case raft_cmdpb.CmdType_Put:
-			fmt.Printf("Put data: %v",req.Put.Value)
 			kvWb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
 		case raft_cmdpb.CmdType_Delete:
 			kvWb.DeleteCF(req.Delete.Cf, req.Delete.Key)
@@ -148,6 +146,7 @@ func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *p
 		if ok == true {
 			switch req.CmdType {
 			case raft_cmdpb.CmdType_Get:
+				log.Infof(" %s handle Msg get, key: %v", h.Tag, req.Get.Key)
 				h.peerStorage.applyState.AppliedIndex = entry.Index
 				kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
 				val,_ := engine_util.GetCF(h.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
@@ -156,16 +155,19 @@ func (h *proposalHandler) handleRequest(msg *raft_cmdpb.RaftCmdRequest, entry *p
 					Get: &raft_cmdpb.GetResponse{Value: val},
 				})
 			case raft_cmdpb.CmdType_Delete:
+				log.Infof(" %s handle Msg delete, key: %v", h.Tag, req.Delete.Key)
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 				CmdType: raft_cmdpb.CmdType_Delete,
 				Delete: &raft_cmdpb.DeleteResponse{},
 				})
 			case raft_cmdpb.CmdType_Put:
+				log.Infof(" %s handle Msg put, put data: %v", h.Tag, req.Put.Value)
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Put,
 					Put: &raft_cmdpb.PutResponse{},
 				})
 			case raft_cmdpb.CmdType_Snap:
+				log.Infof(" %s handle Msg snap.", h.Tag)
 				if msg.Header.RegionEpoch.Version != h.Region().RegionEpoch.Version {
 					cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 					return

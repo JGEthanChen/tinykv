@@ -63,12 +63,13 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 }
 
 func (d *peerMsgHandler) HandleRaftReady() {
-	log.Infof("Handling raftready id: %v\n", d.Meta.Id)
+	log.Infof(" %s handle raft ready.", d.Tag)
 	if d.stopped {
 		return
 	}
 	// Your Code Here (2B).
 	if !d.RaftGroup.HasReady() {
+		log.Infof(" %s is not ready.", d.Tag)
 		return
 	}
 	rd := d.RaftGroup.Ready()
@@ -89,6 +90,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			storeMeta.Unlock()
 		}
 	}
+	log.Infof("raft ready messages len %d", len(rd.Messages))
 	d.Send(d.ctx.trans, rd.Messages)
 	proposalHandler := newProposalHandler(d, rd.CommittedEntries)
 	proposalHandler.HandleProposal()
@@ -108,9 +110,10 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
-		log.Infof("[Region %d]RaftCmd: %v Peerid: %v\n",raftCMD.Request.Requests[0].CmdType, d.Meta.Id, raftCMD.Request.Header.RegionId)
+		log.Infof(" %s handle raft command, cmdType: %s.", d.Tag, util.GetRequestType(raftCMD.Request))
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
+		log.Infof(" %s Tick message.\n",d.Tag)
 		d.onTick()
 	case message.MsgTypeSplitRegion:
 		split := msg.Data.(*message.MsgSplitRegion)
@@ -119,9 +122,11 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	case message.MsgTypeRegionApproximateSize:
 		d.onApproximateRegionSize(msg.Data.(uint64))
 	case message.MsgTypeGcSnap:
+		log.Infof(" %s RaftCmd: %v Peerid: %v\n",d.Tag, d.Meta.Id, d.Meta.Id)
 		gcSnap := msg.Data.(*message.MsgGCSnap)
 		d.onGCSnap(gcSnap.Snaps)
 	case message.MsgTypeStart:
+		log.Infof(" %s Peer id: %d Message Start.\n",d.Tag, d.Meta.Id)
 		d.startTicker()
 	}
 }
@@ -183,7 +188,6 @@ func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 	if err != nil {
 		panic(err)
 	}
-	//fmt.Println("Yeah")
 	d.proposals = append(d.proposals, &proposal{
 		index: d.nextProposalIndex(),
 		term: d.Term(),
@@ -286,6 +290,7 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 
 }
 
+
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -295,10 +300,10 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// Your Code Here (2B).
 	switch {
 	case msg.GetAdminRequest() != nil:
-		//fmt.Println("Admin requests")
+
 		d.proposeAdminRequest(msg,cb)
 	case len(msg.Requests) > 0 :
-		//fmt.Println("Normal requests")
+
 		d.proposeRequest(msg,cb)
 	}
 
@@ -353,17 +358,21 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	log.Debugf ("%s handle raft message %s from %d to %d",
 		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
+		log.Infof("Raft Message %s not valid.",msg.GetMessage().GetMsgType())
 		return nil
 	}
 	if d.stopped {
+		log.Infof("Raft Message %s stop.",msg.GetMessage().GetMsgType())
 		return nil
 	}
 	if msg.GetIsTombstone() {
+		log.Infof("Raft Message %s Tombstone.",msg.GetMessage().GetMsgType())
 		// we receive a message tells us to remove self.
 		d.handleGCPeerMsg(msg)
 		return nil
 	}
 	if d.checkMessage(msg) {
+		log.Infof("Raft Message %s Tombstone.",msg.GetMessage().GetMsgType())
 		return nil
 	}
 	key, err := d.checkSnapshot(msg)
@@ -375,6 +384,7 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 		// delete them here. If the snapshot file will be reused when
 		// receiving, then it will fail to pass the check again, so
 		// missing snapshot files should not be noticed.
+		log.Infof("Raft Message %s key is nil.",msg.GetMessage().GetMsgType())
 		s, err1 := d.ctx.snapMgr.GetSnapshotForApplying(*key)
 		if err1 != nil {
 			return err1

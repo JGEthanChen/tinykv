@@ -38,102 +38,119 @@ func NewServer(storage storage.Storage) *Server {
 
 // Raw API.
 func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kvrpcpb.RawGetResponse, error) {
+	resp := &kvrpcpb.RawGetResponse{}
+
 	reader,err := server.storage.Reader(req.Context)
+	defer reader.Close()
 	if err != nil {
-		return &kvrpcpb.RawGetResponse{Error: err.Error()}, err
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = resp.RegionError.Message
+			return resp, err
+		}
+		return resp, nil
 	}
 	val,err := reader.GetCF(req.Cf, req.Key)
 	if err != nil {
-		return &kvrpcpb.RawGetResponse{Error:err.Error()}, err
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		// the error is not a region error, return error string
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = resp.RegionError.Message
+			return resp, err
+		}
+		return resp, nil
 	}
 	if val == nil {
-		return &kvrpcpb.RawGetResponse{NotFound: true}, nil
+		resp.NotFound = true
 	}
-
-	response := &kvrpcpb.RawGetResponse{
-		Value: val,
-		NotFound: false,
-	}
-	return response, nil
+	resp.Value = val
+	return resp, nil
 }
 
 func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
 	// Your Code Here (1).
-	m := storage.Modify{
-		Data: storage.Put{
+	resp := &kvrpcpb.RawPutResponse{}
+
+
+	err := server.storage.Write(req.Context, []storage.Modify{storage.Modify{
+		Data: storage.Put {
+			Cf: req.Cf,
 			Key: req.Key,
 			Value: req.Value,
-			Cf: req.Cf,
 		},
-	}
-
-	err := server.storage.Write(req.Context, []storage.Modify{m})
+	}})
 	if err != nil {
-		return &kvrpcpb.RawPutResponse{
-			Error: err.Error(),
-		}, err
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = resp.RegionError.Message
+			return resp, err
+		}
 	}
-	return &kvrpcpb.RawPutResponse{
-		RegionError:          nil,
-		Error:                "",
-		XXX_NoUnkeyedLiteral: struct{}{},
-		XXX_unrecognized:     nil,
-		XXX_sizecache:        0,
-	}, nil
+	return resp, nil
 }
 
 func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
 	// Your Code Here (1).
-	del := storage.Modify{
+	resp := &kvrpcpb.RawDeleteResponse{}
+	
+	err := server.storage.Write(req.Context, []storage.Modify{storage.Modify{
 		Data: storage.Delete{
 			Cf: req.Cf,
 			Key: req.Key,
 		},
-	}
-	
-	err := server.storage.Write(req.Context, []storage.Modify{del})
+	}})
 	if err != nil {
-		return &kvrpcpb.RawDeleteResponse{
-			Error: err.Error(),
-		},nil
+		// change error into region error
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = resp.RegionError.Message
+			return resp, err
+		}
 	}
-	return &kvrpcpb.RawDeleteResponse{
-		RegionError:          nil,
-		Error:                "",
-		XXX_NoUnkeyedLiteral: struct{}{},
-		XXX_unrecognized:     nil,
-		XXX_sizecache:        0,
-	}, nil
+	return resp, nil
 }
 
 func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
 	// Your Code Here (1).
-	response := &kvrpcpb.RawScanResponse{}
+	resp := &kvrpcpb.RawScanResponse{}
+
 	reader,err := server.storage.Reader(req.Context)
-	if err != nil {
-		return &kvrpcpb.RawScanResponse {
-			Error: err.Error(),
-		},err
-	}
-	iter := reader.IterCF(req.Cf)
 	defer reader.Close()
+	if err != nil {
+		resp.RegionError = util.RaftstoreErrToPbError(err)
+		if len(resp.RegionError.Message) != 0 {
+			resp.Error = resp.RegionError.Message
+			return resp, err
+		}
+		return resp, nil
+	}
+
+	iter := reader.IterCF(req.Cf)
 	defer iter.Close()
 
 	iter.Seek(req.StartKey)
-	for i:=uint32(0);iter.Valid() && i < req.Limit ; i++ {
-		val,err := iter.Item().Value()
+	for count:=uint32(0);iter.Valid() && count < req.Limit; iter.Next() {
+		item := iter.Item()
+		val,err := item.Value()
 		if err != nil {
-			return &kvrpcpb.RawScanResponse {
-				Error: err.Error(),
-			},err
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			if len(resp.RegionError.Message) != 0 {
+				resp.Error = resp.RegionError.Message
+				return resp, err
+			}
+			return resp, nil
 		}
-		response.Kvs = append(response.Kvs, &kvrpcpb.KvPair{
-			Key: iter.Item().Key(),
+		resp.Kvs = append(resp.Kvs, &kvrpcpb.KvPair{
+			Key: item.Key(),
 			Value: val,
 		})
-		iter.Next()
+		count++
 	}
-	return response, nil
+	return resp, nil
 }
 
 // Raft commands (tinykv <-> tinykv)

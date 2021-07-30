@@ -270,7 +270,7 @@ func New() *Logger {
 	if err != nil {
 		panic(err)
 	}
-	return NewLogger(io.MultiWriter(file, os.Stderr), "")
+	return NewLogger(file, "")
 }
 
 func NewLogger(w io.Writer, prefix string) *Logger {

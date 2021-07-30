@@ -146,7 +146,6 @@ func (rn *RawNode) Step(m pb.Message) error {
 	if pr := rn.Raft.Prs[m.From]; pr != nil || !IsResponseMsg(m.MsgType) {
 		return rn.Raft.Step(m)
 	}
-	//fmt.Printf("\n%v %v %v\n", m.From, rn.Raft.Prs[m.From], rn.Raft.Prs[rn.Raft.id])
 	return ErrStepPeerNotFound
 }
 
@@ -161,7 +160,10 @@ func (rn *RawNode) Ready() Ready {
 	}
 	if len(r.msgs) > 0 {
 		rd.Messages = r.msgs
+		// note that msg must be clean after get into ready!
+		rn.Raft.msgs = nil
 	}
+
 
 	hardSt := pb.HardState{
 		Term:   r.Term,

@@ -334,7 +334,8 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 func (c *RaftCluster) checkMustUpdate(recvRegion, curRegion *core.RegionInfo) bool {
 	// this func is to reduce redundant updates
 	// Below 6 conditions are enough to pass the test, but it may not be sufficient and necessary
-	// In order to guarantee the correctness, this function return true default, and return false only when not satisfy all conditions
+	// In order to guarantee the correctness, this function return true default,
+	// and return false only when not satisfy all conditions
 	// 1. Leader changed
 	// 2. ApproximateSize changed
 	// 3. New one's version or conf_ver is greater than the original one

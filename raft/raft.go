@@ -216,6 +216,7 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 
+	log.Infof("MsgSendAppend Peer %d, To %d, Term %v, Commit Index %d", r.id, to, r.Term, r.RaftLog.committed)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		From: r.id,
@@ -264,6 +265,7 @@ func (r *Raft) sendTimeout(to uint64) {
 
 //send snapshot response
 func (r *Raft) sendSnapshotResponse(to uint64, index uint64) {
+	log.Infof("snapshot peer %d", r.id)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		Term:r.Term,
@@ -325,6 +327,7 @@ func (r *Raft) sendRequestVote(to uint64) {
 
 //send the response Request Vote
 func (r *Raft) sendRequestVoteResponse(to uint64, vote bool) {
+	log.Infof("RequesetVoteResponse Peer %d, To %d, vote %v", r.id, to, r.Term)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
 		From: r.id,
@@ -337,6 +340,7 @@ func (r *Raft) sendRequestVoteResponse(to uint64, vote bool) {
 
 //send the response of msgappend
 func (r *Raft) sendAppendResponse(to uint64, logTerm uint64,lastIndex uint64, reject bool) {
+	log.Infof("MsgAppend Peer %d, To %d, Term %v, Reject %v, LogTerm %d, Index %d", r.id, to, r.Term, reject, logTerm, lastIndex)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		From:    r.id,
@@ -392,6 +396,7 @@ func (r *Raft)tickHeartbeat() {
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
 	// init the Elapsed timer and votes
+	log.Infof("Peer id %d become follower", r.id)
 	if r.electionTimeout >0 {
 		//means set the timeout
 		randTemp := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -413,6 +418,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	log.Infof("Peer id %d become Candidate", r.id)
 	if r.electionTimeout >0 {
 		//means set the timeout
 		randTemp := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -444,6 +450,8 @@ func (r *Raft) becomeCandidate() {
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
+
+	log.Infof("Peer id %d become Leader", r.id)
 	// NOTE: Leader should propose a noop entry on its term
 	if r.State != StateLeader {
 		//this function cant be called more than once
@@ -623,7 +631,9 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 //handleMsgTimeoutNow handle the msg that current leader Timeout Request
 func (r *Raft) handleMsgTimeoutNow(m pb.Message) {
-	if r.Prs[r.id] != nil {
+	// if the node is new or already is candidate, just skip the msg
+	if r.Prs[r.id] != nil || r.State != StateCandidate{
+		log.Infof("timeout %d become candidate", r.id)
 		r.becomeCandidate()
 		for id := uint64(1); id <= uint64(len(r.Prs)); id++ {
 			if id != r.id {
@@ -746,7 +756,7 @@ func (r *Raft) handleMsgPropose(entries []*pb.Entry) {
 		entry.Term = r.Term
 		//TODO confirm the lastIndex +1
 		entry.Index = lastIndex + uint64(i) +1
-		log.Infof("id:%v enrty:term index %v %v self index: %v\n",r.id, entry.Term,entry.Index,r.RaftLog.committed)
+		log.Infof("MsgPropose id:%v enrty:term index %v %v self index: %v\n",r.id, entry.Term,entry.Index,r.RaftLog.committed)
 		if entry.EntryType == pb.EntryType_EntryConfChange {
 			if r.PendingConfIndex != None {
 				continue
@@ -773,6 +783,7 @@ func (r *Raft) bcastAppend() {
 }
 
 func (r *Raft) handleMsgAppendResponse(m pb.Message) {
+	log.Infof("MsgAppendResponse Term %d, Index %d logTerm %d commit %d",m.Term,m.Index,m.LogTerm,m.Commit)
 	if m.Term != None && m.Term < r.Term {
 		return
 	}

@@ -40,6 +40,26 @@ func CheckKeyInRegion(key []byte, region *metapb.Region) error {
 	}
 }
 
+// get the cmd msg type as a string
+func GetRequestType(msg *raft_cmdpb.RaftCmdRequest) string {
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_InvalidAdmin:
+			return "AdminCmdType_InvalidAdmin"
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			return "AdminCmdType_ChangePeer"
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+			return "AdminCmdType_TransferLeader"
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			return "AdminCmdType_CompactLog"
+		case raft_cmdpb.AdminCmdType_Split:
+			return "AdminCmdType_Split"
+		}
+	} else {
+		return "Normal requests."
+	}
+	return ""
+}
 /// Check if key in region range (`start_key`, `end_key`).
 func CheckKeyInRegionExclusive(key []byte, region *metapb.Region) error {
 	if bytes.Compare(region.StartKey, key) < 0 && (len(region.EndKey) == 0 || bytes.Compare(key, region.EndKey) < 0) {
