@@ -227,7 +227,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
 			//Debugf
-			fmt.Printf("can't call command %s on leader %d of region %d\n", request.String(), leader.GetId(), regionID)
+			log.Infof("can't call command %s on leader %d of region %d\n", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
 			if leader == newLeader {
 				region, _, err := c.schedulerClient.GetRegionByID(context.TODO(), regionID)
@@ -248,11 +248,13 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		if resp.Header.Error != nil {
 			err := resp.Header.Error
 			if err.GetStaleCommand() != nil || err.GetEpochNotMatch() != nil || err.GetNotLeader() != nil {
-				log.Debugf("encouter retryable err %+v", resp)
+				log.Infof("encouter retryable err %+v", resp)
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
+					log.Infof("Get New leader %d", err.GetNotLeader().Leader)
 					leader = err.GetNotLeader().Leader
 				} else {
 					leader = c.LeaderOfRegion(regionID)
+					log.Infof("Use region info leader %d", leader)
 				}
 				continue
 			}

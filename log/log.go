@@ -50,6 +50,8 @@ const (
 const FORMAT_TIME_DAY string = "20060102"
 const FORMAT_TIME_HOUR string = "2006010215"
 
+const DEBUG bool = true
+
 var _log *Logger = New()
 
 func init() {
@@ -228,7 +230,9 @@ func (l *Logger) Info(v ...interface{}) {
 }
 
 func (l *Logger) Infof(format string, v ...interface{}) {
-	l.logf(LOG_INFO, format, v...)
+	if DEBUG{
+		l.logf(LOG_INFO, format, v...)
+	}
 }
 
 func StringToLogLevel(level string) LogLevel {
@@ -270,6 +274,7 @@ func New() *Logger {
 	if err != nil {
 		panic(err)
 	}
+
 	return NewLogger(file, "")
 }
 

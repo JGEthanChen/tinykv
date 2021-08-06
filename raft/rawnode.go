@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -110,6 +111,30 @@ func (rn *RawNode) Propose(data []byte) error {
 
 // ProposeConfChange proposes a config change.
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
+	log.Infof("ConfChange peer %d propose", rn.Raft.id)
+	// if the raft node already has a pending task, just skip
+	if rn.Raft.PendingConfIndex > 0 {
+		log.Infof("Here has another conf change")
+		return ErrProposalDropped
+	}
+	// Case that ConfChange needs remove node itself and node is leader;
+	// In this case, it should transfer leader to a proper peer.
+	if rn.Raft.State == StateLeader && cc.NodeId == rn.Raft.id && cc.ChangeType == pb.ConfChangeType_RemoveNode {
+		if rn.Raft.leadTransferee != None {
+			log.Infof("Leader %d is already transferring, please try later.")
+			return ErrProposalDropped
+		}
+		//choose the proper follower node to replace
+		replaceId := rn.Raft.GetProperFollower()
+		log.Infof("Node leader id:%d, receive remove node msg, choose follower %d", rn.Raft.id, replaceId)
+		log.Infof("ConfChange peer %d firstly transfer to %d", rn.Raft.id, replaceId)
+		if replaceId == 0 || replaceId == rn.Raft.id{
+			log.Infof("Proper follower not found.")
+			return nil
+		}
+		rn.TransferLeader(replaceId)
+		return ErrProposalDropped
+	}
 	data, err := cc.Marshal()
 	if err != nil {
 		return err
@@ -158,6 +183,7 @@ func (rn *RawNode) Ready() Ready {
 		Entries:          r.RaftLog.unstableEntries(),
 		CommittedEntries: r.RaftLog.nextEnts(),
 	}
+	log.Infof("Ready prepare %d %d %d",  rn.Raft.RaftLog.applied,rn.Raft.RaftLog.committed,  rn.Raft.RaftLog.LastIndex())
 	if len(r.msgs) > 0 {
 		rd.Messages = r.msgs
 		// note that msg must be clean after get into ready!

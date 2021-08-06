@@ -220,7 +220,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					log.Infof("%d: client new put %v,%v\n", cli, key, value)
-					fmt.Printf("testtest233 %d: client new put %v,%v\n", cli, key, value)
+					log.Infof("testtest233 %d: client new put %v,%v\n", cli, key, value)
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
@@ -532,7 +532,7 @@ func TestSnapshotUnreliableRecover2C(t *testing.T) {
 	GenericTest(t, "2C", 5, true, true, false, 100, false, false)
 }
 
-// TODO: error
+// TODO: sometimes error
 func TestSnapshotUnreliableRecoverConcurrentPartition2C(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, many clients (2C) ...
 	GenericTest(t, "2C", 5, true, true, true, 100, false, false)

@@ -18,6 +18,7 @@ func GetRegionLocalState(db *badger.DB, regionId uint64) (*rspb.RegionLocalState
 
 func GetRaftLocalState(db *badger.DB, regionId uint64) (*rspb.RaftLocalState, error) {
 	raftLocalState := new(rspb.RaftLocalState)
+	//fmt.Printf("RaftStateKey: %v \n", RaftStateKey(regionId))
 	if err := engine_util.GetMeta(db, RaftStateKey(regionId), raftLocalState); err != nil {
 		return raftLocalState, err
 	}

@@ -56,6 +56,13 @@ func GetRequestType(msg *raft_cmdpb.RaftCmdRequest) string {
 			return "AdminCmdType_Split"
 		}
 	} else {
+		if msg.Requests != nil {
+			for _,req := range msg.Requests {
+				if req.CmdType == raft_cmdpb.CmdType_Put {
+					return fmt.Sprintf("Put request key %s, val %s", string(req.Put.Key), string(req.Put.Value))
+				}
+			}
+		}
 		return "Normal requests."
 	}
 	return ""
@@ -182,6 +189,7 @@ func CheckStoreID(req *raft_cmdpb.RaftCmdRequest, storeID uint64) error {
 	if peer.StoreId == storeID {
 		return nil
 	}
+	log.Infof("store not match %d %d", peer.StoreId, storeID)
 	return errors.Errorf("store not match %d %d", peer.StoreId, storeID)
 }
 
