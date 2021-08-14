@@ -90,7 +90,7 @@ func (snapCtx *snapContext) handleGen(regionId uint64, notifier chan<- *eraftpb.
 
 // applySnap applies snapshot data of the Region.
 func (snapCtx *snapContext) applySnap(regionId uint64, startKey, endKey []byte, snapMeta *eraftpb.SnapshotMetadata) error {
-	log.Infof("begin apply snap data. [regionId: %d]", regionId)
+	log.Infof("begin apply snap data. [regionId: %d] startKey %s endKey %s", regionId, string(startKey), string(endKey))
 
 	// cleanUpOriginData clear up the region data before applying snapshot
 	snapCtx.cleanUpRange(regionId, startKey, endKey)
@@ -162,7 +162,7 @@ func getAppliedIdxTermForSnapshot(raft *badger.DB, kv *badger.Txn, regionId uint
 }
 
 func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId uint64) (*eraftpb.Snapshot, error) {
-	log.Debugf("begin to generate a snapshot. [regionId: %d]", regionId)
+	log.Infof("begin to generate a snapshot. [regionId: %d]", regionId)
 
 	txn := engines.Kv.NewTransaction(false)
 
@@ -170,6 +170,8 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 	if err != nil {
 		return nil, err
 	}
+
+	log.Infof("begin to generate a snapshot. Index %d", index)
 
 	key := snap.SnapKey{RegionID: regionId, Index: index, Term: term}
 	mgr.Register(key, snap.SnapEntryGenerating)

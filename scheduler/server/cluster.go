@@ -282,7 +282,6 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
 	storedRegion := c.GetRegion(region.GetID())
 
-	//TODO Check the split condition, how region id change
 
 	// No region found, means the region in core maybe split into several pieces
 	if storedRegion == nil {

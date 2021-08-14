@@ -144,7 +144,7 @@ func CheckRegionEpoch(req *raft_cmdpb.RaftCmdRequest, region *metapb.Region, inc
 	// KeyNotInRegion error.
 	if (checkConfVer && fromEpoch.ConfVer != currentEpoch.ConfVer) ||
 		(checkVer && fromEpoch.Version != currentEpoch.Version) {
-		log.Debugf("epoch not match, region id %v, from epoch %v, current epoch %v",
+		log.Infof("epoch not match, region id %v, from epoch %v, current epoch %v",
 			region.Id, fromEpoch, currentEpoch)
 
 		regions := []*metapb.Region{}

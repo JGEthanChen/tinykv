@@ -3,7 +3,6 @@ package raftstore
 import (
 	"fmt"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
-	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -74,7 +73,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	rd := d.RaftGroup.Ready()
 	if len(rd.CommittedEntries) != 0 {
-		log.Infof(" %s handle raft ready. commit msg first last commit index %d %d", d.Tag, rd.CommittedEntries[0].Index,rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
+		log.Infof(" %s handle raft ready. commit msg first last commit index %d %d , last index %d", d.Tag, rd.CommittedEntries[0].Index,rd.CommittedEntries[len(rd.CommittedEntries)-1].Index, d.RaftGroup.Raft.RaftLog.LastIndex())
 	} else {
 		log.Infof(" %s handle raft ready. No commit entry", d.Tag)
 	}
@@ -85,7 +84,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 
 	if applySnapRes != nil {
-		if !reflect.DeepEqual(applySnapRes.PrevRegion, applySnapRes.Region) {
+		if !util.RegionEqual(applySnapRes.PrevRegion, applySnapRes.Region) {
 			d.ctx.storeMeta.Lock()
 			d.ctx.storeMeta.setRegion(applySnapRes.Region, d.peer)
 			d.ctx.storeMeta.regions[applySnapRes.Region.Id] = applySnapRes.Region
@@ -100,6 +99,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	d.Send(d.ctx.trans, rd.Messages)
 	proposalHandler := newProposalHandler(d, rd.CommittedEntries)
 	proposalHandler.HandleProposal()
+	// d.proposals = nil
 	d.RaftGroup.Advance(rd)
 
 }
@@ -109,15 +109,25 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
-		log.Infof(" %s handle raft message %s from %d to %d, MsgType: %v" ,
-				d.Tag, raftMsg.GetMessage().GetMsgType(), raftMsg.GetFromPeer().GetId(), raftMsg.GetToPeer().GetId(),raftMsg.Message.MsgType)
-
+//		log.Infof(" %s handle raft message %s from %d to %d, MsgType: %v" ,
+//				d.Tag, raftMsg.GetMessage().GetMsgType(), raftMsg.GetFromPeer().GetId(), raftMsg.GetToPeer().GetId(),raftMsg.Message.MsgType)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
 		log.Infof(" %s handle raft command, peer %d store %d cmdType: %s.", d.Tag, raftCMD.Request.Header.Peer.Id, raftCMD.Request.Header.Peer.StoreId, util.GetRequestType(raftCMD.Request))
+		if raftCMD.Request != nil && raftCMD.Request.Requests != nil{
+			for _,req := range raftCMD.Request.Requests {
+				switch req.CmdType {
+				case raft_cmdpb.CmdType_Put:
+					log.Infof("%s propose msg type put key %s", d.Tag, string(req.Put.Key))
+				case raft_cmdpb.CmdType_Delete:
+					log.Infof("%s propose msg type delete key %s", d.Tag, string(req.Delete.Key))
+				}
+
+			}
+		}
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
 		log.Infof(" %s Tick message.\n",d.Tag)
@@ -141,6 +151,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) error {
 	// Check store_id, make sure that the msg is dispatched to the right place.
 	if err := util.CheckStoreID(req, d.storeID()); err != nil {
+		log.Infof("store not match")
 		return err
 	}
 
@@ -162,6 +173,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 		log.Infof("not the term")
 		return err
 	}
+//	log.Infof("Req region ver %d cf ver %d curRegion ver %d cf ver %d", req.Header.RegionEpoch.Version, req.Header.RegionEpoch.ConfVer, d.Region().RegionEpoch.Version, d.Region().RegionEpoch.ConfVer)
 	err := util.CheckRegionEpoch(req, d.Region(), true)
 	if errEpochNotMatching, ok := err.(*util.ErrEpochNotMatch); ok {
 		// Attach the region which might be split from the current region. But it doesn't
@@ -170,8 +182,11 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 		// updated.
 		siblingRegion := d.findSiblingRegion()
 		if siblingRegion != nil {
+			log.Infof(" %s find siblingRegion id %d, start key %s, end key %s", d.Tag, siblingRegion.Id, string(siblingRegion.StartKey), string(siblingRegion.EndKey))
+
 			errEpochNotMatching.Regions = append(errEpochNotMatching.Regions, siblingRegion)
 		}
+		// log.Infof(" %s not find siblingRegion", d.Tag)
 		return errEpochNotMatching
 	}
 	return err
@@ -225,6 +240,7 @@ func (d *peerMsgHandler) proposeCompactLog(msg *raft_cmdpb.RaftCmdRequest, cb *m
 	if err != nil {
 		panic(err)
 	}
+
 	if err = d.RaftGroup.Propose(data);err != nil {
 		cb.Done(ErrResp(err))
 	}
@@ -249,11 +265,6 @@ func (d *peerMsgHandler) proposeTransferLeader(msg *raft_cmdpb.RaftCmdRequest, c
 // proposeChangePeer
 func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	changePeerRequest := msg.GetAdminRequest().GetChangePeer()
-	resp := newCmdResp()
-	resp.AdminResponse = &raft_cmdpb.AdminResponse{
-		CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
-	}
-	resp.AdminResponse.ChangePeer = &raft_cmdpb.ChangePeerResponse{}
 
 	//drive the raft propose Conf change
 	context,_ := msg.Marshal()
@@ -265,12 +276,18 @@ func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *m
 		Context: context,
 	}
 
+	pIndex := d.nextProposalIndex()
+	pTerm := d.Term()
+
 	if err :=d.RaftGroup.ProposeConfChange(confChange); err != nil {
 		cb.Done(ErrResp(err))
 	} else {
-		cb.Done(resp)
+		d.proposals = append(d.proposals, &proposal{
+			index: pIndex,
+			term: pTerm,
+			cb: cb,
+		})
 	}
-	return
 }
 
 func (d *peerMsgHandler) proposeSplit(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
@@ -822,6 +839,14 @@ func (d *peerMsgHandler) onGCSnap(snaps []snap.SnapKeyWithSending) {
 	}
 }
 
+func (d *peerMsgHandler) setRegionWithLock (region *metapb.Region) {
+	d.ctx.storeMeta.Lock()
+	d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: d.Region()})
+	d.ctx.storeMeta.setRegion(region, d.peer)
+	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: region})
+	d.ctx.storeMeta.Unlock()
+}
+
 func newAdminRequest(regionID uint64, peer *metapb.Peer) *raft_cmdpb.RaftCmdRequest {
 	return &raft_cmdpb.RaftCmdRequest{
 		Header: &raft_cmdpb.RaftRequestHeader{
@@ -842,3 +867,5 @@ func newCompactLogRequest(regionID uint64, peer *metapb.Peer, compactIndex, comp
 	}
 	return req
 }
+
+

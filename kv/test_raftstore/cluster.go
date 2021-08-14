@@ -193,6 +193,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
 		if resp == nil {
 			// it should be timeouted innerly
+			log.Infof("Request time out!")
 			fmt.Println("Request time out!")
 			SleepMS(100)
 			continue
@@ -237,10 +238,11 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 				peers := region.GetPeers()
 				leader = peers[rand.Int()%len(peers)]
 				//log.Debugf
+				log.Infof("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
 				fmt.Printf("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
 			} else {
 				leader = newLeader
-				//log.Debugf
+				log.Infof("use new leader %d of region %d\n", leader.GetId(), regionID)
 				fmt.Printf("use new leader %d of region %d\n", leader.GetId(), regionID)
 			}
 			continue

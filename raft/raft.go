@@ -33,9 +33,15 @@ const None uint64 = 0
 type StateType uint64
 
 const (
-	StateFollower StateType = iota
+	StateFollower  StateType = iota
 	StateCandidate
 	StateLeader
+)
+
+const (
+	SnapshotNoNeed StateType = iota
+	SnapshotWaiting
+	SnapshotSending
 )
 
 var stmap = [...]string{
@@ -111,6 +117,11 @@ func (c *Config) validate() error {
 // progresses of all followers, and sends entries to the follower based on its progress.
 type Progress struct {
 	Match, Next uint64
+
+	// if leader need to send snapshot to one node, and snapshot is not ready or snapshot has been sent.
+	// use a flag to state
+	snapState StateType
+
 }
 
 type Raft struct {
@@ -128,6 +139,11 @@ type Raft struct {
 	// this peer's role
 	State StateType
 
+
+	// If the network partition the raft group
+	// use the isolated to record the isolated node for the leader
+	isolates map[uint64]bool
+
 	// votes records
 	votes map[uint64]bool
 
@@ -140,7 +156,7 @@ type Raft struct {
 	// heartbeat interval, should send
 	heartbeatTimeout int
 	//avoid the votes are part, add a random mechanism
-	electinorandomInterval int
+	electionRandomInterval int
 	// baseline of election interval
 	electionTimeout int
 	// number of ticks since it reached last heartbeatTimeout.
@@ -148,6 +164,16 @@ type Raft struct {
 	heartbeatElapsed int
 	// number of ticks since it reached last electionTimeout
 	electionElapsed int
+
+
+	// To avoid generating snapshot too frequently
+	// use a snapshotElapsed to show if the snapshot is ready
+	snapshotElapsed int
+
+	pendingSnapshotIndex uint64
+
+	// If the snapshotElapsed timeout, means snapshot is ready, could try to send again
+	snapReady bool
 
 	//number of ticks since it reached last transfer msg timeout
 	transferElapsed int
@@ -171,6 +197,7 @@ type Raft struct {
 	// Use a flag to figure out whether transferee need help
 	helpTransferee bool
 
+
 }
 
 // newRaft return a raft peer with the given config
@@ -191,6 +218,7 @@ func newRaft(c *Config) *Raft {
 		Prs: make(map[uint64]*Progress),
 		msgs: make([]pb.Message,0),
 		votes: make(map[uint64]bool),
+		isolates: make(map[uint64]bool),
 	}
 	r.becomeFollower(0, None)
 
@@ -221,7 +249,7 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 
-	log.Infof("MsgSendAppend Peer %d, To %d, Term %v, Commit Index %d", r.id, to, r.Term, r.RaftLog.committed)
+	// log.Infof("MsgSendAppend Peer %d, To %d, Term %v, Commit Index %d", r.id, to, r.Term, r.RaftLog.committed)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		From: r.id,
@@ -233,17 +261,16 @@ func (r *Raft) sendAppend(to uint64) bool {
 	ents := make([]*pb.Entry,0)
 	nextIndex := r.Prs[to].Next
 	curTerm,err := r.RaftLog.Term(nextIndex-1)
-	if err != nil {
-		if err == ErrCompacted {
-			r.sendSnapshot(to)
-			return false
-		}
-		panic(err)
+
+	if err != nil || nextIndex < r.RaftLog.firstOffset{
+		log.Infof("Leader %d send append to %d, Errcompacted, next index %d.", r.id, to, nextIndex )
+		r.sendSnapshot(to)
+		return false
 	}
 	msg.LogTerm = curTerm
 
-	//apend entry to send
-	lastIndex := r.RaftLog.LastIndex();
+	//append entry to send
+	lastIndex := r.RaftLog.LastIndex()
 	for i := nextIndex; i<=lastIndex; i++ {
 		ents = append(ents, &r.RaftLog.entries[i-r.RaftLog.firstOffset])
 	}
@@ -284,8 +311,21 @@ func (r *Raft) sendSnapshotResponse(to uint64, index uint64) {
 
 //send Snapshot
 func (r *Raft) sendSnapshot(to uint64) {
+	if r.Prs[to].snapState == SnapshotWaiting && r.snapReady == false {
+		log.Infof("Peer %d Snapshot not ready.",r.id)
+		return
+	}
+	if r.Prs[to].snapState == SnapshotSending {
+		log.Infof("Peer %d Snapshot is sending",r.id)
+		return
+	}
 	snap,err := r.RaftLog.storage.Snapshot()
 	if err != nil {
+		log.Infof("Snapshot not available.")
+		r.Prs[to].snapState = SnapshotWaiting
+		r.snapReady = false
+		r.snapshotElapsed = 0
+		r.pendingSnapshotIndex = 0
 		return
 	}
 	r.Prs[to].Next = snap.Metadata.Index + 1
@@ -296,21 +336,35 @@ func (r *Raft) sendSnapshot(to uint64) {
 		Term: r.Term,
 		Snapshot: &snap,
 	})
+	// snapshot is finished
+	r.pendingSnapshotIndex = snap.Metadata.Index
+	r.Prs[to].snapState = SnapshotSending
 	return
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) {
+func (r *Raft) sendHeartbeat() {
 	// Your Code Here (2A).
-
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgHeartbeat,
-		From: r.id,
-		To: to,
-		Term: r.Term,
+	if  r.checkIsolate(){
+		log.Infof("Peer %d isolated, become candidate", r.id)
+		r.becomeFollower(r.id, None)
+		return
 	}
-	r.msgs = append(r.msgs, msg)
+	msgs := make([]pb.Message,0)
+	for peer := range r.Prs {
+		if peer != r.id {
+			msg := pb.Message{
+				MsgType: pb.MessageType_MsgHeartbeat,
+				From:    r.id,
+				To:      peer,
+				Term:    r.Term,
+			}
+			msgs = append(msgs, msg)
+			r.isolates[peer] = true
+		}
+	}
 
+	r.msgs = append(r.msgs, msgs...)
 }
 
 //candidate send vote request
@@ -367,8 +421,26 @@ func (r *Raft) tick() {
 		r.tickElection()
 	} else if r.State == StateLeader {
 		r.tickHeartbeat()
+		r.tickSnapShot()
 		if r.leadTransferee != None {
 			r.tickTransferLeader()
+		}
+	}
+
+}
+
+//
+func (r *Raft) tickSnapShot() {
+	r.snapshotElapsed++
+	if r.snapshotElapsed > r.heartbeatTimeout {
+		r.snapReady = true
+		r.snapshotElapsed = 0
+		for peer := range r.Prs {
+			if peer != r.id {
+				if r.Prs[peer].snapState == SnapshotWaiting {
+					r.sendSnapshot(peer)
+				}
+			}
 		}
 	}
 
@@ -377,7 +449,7 @@ func (r *Raft) tick() {
 // tickTransferLeader advances the
 func (r *Raft) tickTransferLeader() {
 	r.transferElapsed++
-	if r.transferElapsed > r.electionTimeout+r.electinorandomInterval {
+	if r.transferElapsed > r.electionTimeout+r.electionRandomInterval {
 		log.Infof("Transfer %d to %d timeout, failed.", r.id, r.leadTransferee)
 		r.helpTransferee = false
 		r.transferElapsed = 0
@@ -388,7 +460,7 @@ func (r *Raft) tickTransferLeader() {
 //control the election of candidate
 func (r *Raft)tickElection() {
 	r.electionElapsed++
-	if r.electionElapsed >= r.electionTimeout+r.electinorandomInterval {
+	if r.electionElapsed >= r.electionTimeout+r.electionRandomInterval {
 		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgHup,
 			From: r.id,
@@ -421,12 +493,14 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	if r.electionTimeout >0 {
 		//means set the timeout
 		randTemp := rand.New(rand.NewSource(time.Now().UnixNano()))
-		r.electinorandomInterval = randTemp.Intn(r.electionTimeout)
+		r.electionRandomInterval = randTemp.Intn(r.electionTimeout)
 	}
+
 
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.leadTransferee = None
+	r.helpTransferee = false
 	r.State = StateFollower
 	r.Vote = None
 
@@ -443,7 +517,7 @@ func (r *Raft) becomeCandidate() {
 	if r.electionTimeout >0 {
 		//means set the timeout
 		randTemp := rand.New(rand.NewSource(time.Now().UnixNano()))
-		r.electinorandomInterval = randTemp.Intn(r.electionTimeout)
+		r.electionRandomInterval = randTemp.Intn(r.electionTimeout)
 	}
 	r.State = StateCandidate
 	//start the election
@@ -472,18 +546,20 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 
-	log.Infof("Peer id %d become Leader", r.id)
 	// NOTE: Leader should propose a noop entry on its term
 	if r.State != StateLeader {
 		//this function cant be called more than once
 		r.State = StateLeader
 		r.heartbeatElapsed = 0
 		r.Lead = r.id
+		r.pendingSnapshotIndex = 0
 		r.leadTransferee = None
 		r.transferElapsed = 0
 		r.helpTransferee = false
+		r.snapReady = false
+		r.snapshotElapsed = 0
 
-		//send noop entry
+		// propose a noop entry
 		preLastIndex := r.RaftLog.LastIndex()
 		r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
 			Term:      r.Term,
@@ -491,30 +567,34 @@ func (r *Raft) becomeLeader() {
 			EntryType: pb.EntryType_EntryNormal,
 		})
 
-		//update index
+		// initialize the Match and Next index for all nodes,
+		// and initialize the isolates too.
 		for peer := range r.Prs {
+			r.isolates[peer] = false
 			if peer == r.id {
 				r.Prs[peer]=&Progress{
 					Match : preLastIndex +1,
 					Next :  preLastIndex +2,
+					snapState: SnapshotNoNeed,
 				}
 			} else {
 				r.Prs[peer]=&Progress{
 					Match: 0,
 					Next:  preLastIndex +1,
+					snapState: SnapshotNoNeed,
 				}
 			}
 
 		}
 
-		//send noop entry to other nodes
+		// send noop entry to other nodes
 		for peer := range r.Prs {
 			if peer != r.id {
 				r.sendAppend(peer)
 			}
 		}
 
-		//if node only has one
+		// if node only has one, it could commit the noop entry directly
 		if len(r.Prs) == 1 {
 			r.RaftLog.committed = r.Prs[r.id].Match
 		}
@@ -526,108 +606,120 @@ func (r *Raft) becomeLeader() {
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	log.Infof("Peer %d step %v from %d to %d" , r.id, m.MsgType,m.From,m.To)
+
+	// In any case, if the node receive a message which term is bigger than itself,
+	// it become follower directly.
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
 	}
 
 	switch r.State {
 	case StateFollower:
-		switch m.MsgType {
-		case pb.MessageType_MsgHup:
-			r.becomeCandidate()
-			for peer := range r.Prs {
-				if peer != r.id {
-					r.sendRequestVote(peer)
-				}
-			}
-			/*
-			for id := uint64(1); id <= uint64(len(r.Prs)); id++ {
-				if id != r.id {
-					r.sendRequestVote(id)
-				}
-			}
-			*/
-		case pb.MessageType_MsgTimeoutNow:
-			r.handleMsgTimeoutNow(m)
-		case pb.MessageType_MsgRequestVote:
-			r.handleRequestVote(m)
-		case pb.MessageType_MsgHeartbeat:
-			r.handleHeartbeat(m)
-		case pb.MessageType_MsgAppend:
-			r.handleAppendEntries(m)
-		case pb.MessageType_MsgSnapshot:
-			r.handleSnapshot(m)
-		case pb.MessageType_MsgTransferLeader:
-			r.handleTransferLeader(m)
-		case pb.MessageType_MsgPropose:
-			return ErrProposalDropped
-		}
+		return r.stepFollower(m)
 	case StateCandidate:
-		switch m.MsgType {
-		case pb.MessageType_MsgHup:
-			r.becomeCandidate()
-			for id := uint64(1); id <= uint64(len(r.Prs)); id++ {
-				if id != r.id {
-					r.sendRequestVote(id)
-				}
-			}
-		case pb.MessageType_MsgTimeoutNow:
-			r.handleMsgTimeoutNow(m)
-		case pb.MessageType_MsgRequestVote:
-			r.handleRequestVote(m)
-		case pb.MessageType_MsgAppend:
-			r.handleAppendEntries(m)
-		case pb.MessageType_MsgHeartbeat:
-			if m.Term == r.Term {
-				r.becomeFollower(m.Term, m.From)
-			}
-			r.handleHeartbeat(m)
-		case pb.MessageType_MsgRequestVoteResponse:
-			r.handleRequestVoteResponse(m)
-		case pb.MessageType_MsgSnapshot:
-			r.becomeFollower(m.Term, m.From)
-			r.handleSnapshot(m)
-		case pb.MessageType_MsgTransferLeader:
-			r.handleTransferLeader(m)
-		case pb.MessageType_MsgPropose:
-			return ErrProposalDropped
-		}
-
+		return r.stepCandidate(m)
 	case StateLeader:
-		switch m.MsgType {
-		case pb.MessageType_MsgBeat:
-			for peerId := uint64(1); peerId <= uint64(len(r.Prs)); peerId++ {
-				if peerId != r.id {
-					r.sendHeartbeat(peerId)
-				}
-			}
-		case pb.MessageType_MsgPropose:
-			// if here transfer leader to a node, the leader should stop other proposals
-			if r.leadTransferee != None {
-				log.Infof("Leader %d is transfering, drop the propose.", r.id)
-				return ErrProposalDropped
-			}
-			r.handleMsgPropose(m)
-		case pb.MessageType_MsgTimeoutNow:
-			r.handleMsgTimeoutNow(m)
-		case pb.MessageType_MsgAppend:
-			r.handleAppendEntries(m)
-		case pb.MessageType_MsgAppendResponse:
-			r.handleMsgAppendResponse(m)
-		case pb.MessageType_MsgRequestVote:
-			r.handleRequestVote(m)
-		case pb.MessageType_MsgHeartbeat:
-			r.handleHeartbeat(m)
-		case pb.MessageType_MsgHeartbeatResponse:
-			r.sendAppend(m.From)
-		case pb.MessageType_MsgSnapshot:
-			r.handleSnapshot(m)
-		case pb.MessageType_MsgTransferLeader:
-			r.handleTransferLeader(m)
-		}
+		return r.stepLeader(m)
 	}
 	return nil
 }
+
+func (r *Raft) stepCandidate(m pb.Message) error {
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		r.becomeCandidate()
+		for peer := range r.Prs {
+			if peer != r.id {
+				r.sendRequestVote(peer)
+			}
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleMsgTimeoutNow(m)
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgHeartbeat:
+		if m.Term == r.Term {
+			r.becomeFollower(m.Term, m.From)
+		}
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		r.handleRequestVoteResponse(m)
+	case pb.MessageType_MsgSnapshot:
+		r.becomeFollower(m.Term, m.From)
+		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
+	case pb.MessageType_MsgPropose:
+		return ErrProposalDropped
+	}
+	return nil
+}
+
+// stepLeader step the message as a leader state
+func (r *Raft) stepLeader(m pb.Message) error {
+	switch m.MsgType {
+	case pb.MessageType_MsgBeat:
+		r.sendHeartbeat()
+	case pb.MessageType_MsgPropose:
+		// if here transfer leader to a node, the leader should stop other proposals
+		if r.leadTransferee != None {
+			log.Infof("Leader %d is transfering, drop the propose.", r.id)
+			return ErrProposalDropped
+		}
+		r.handleMsgPropose(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleMsgTimeoutNow(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgAppendResponse:
+		r.handleMsgAppendResponse(m)
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgHeartbeatResponse:
+		if r.isolates[m.From] == true {
+			r.isolates[m.From] = false
+		}
+		r.sendAppend(m.From)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
+	}
+	return nil
+}
+
+// stepFollower step the message as a follower state
+func (r *Raft) stepFollower(m pb.Message) error{
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		r.becomeCandidate()
+		for peer := range r.Prs {
+			if peer != r.id {
+				r.sendRequestVote(peer)
+			}
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleMsgTimeoutNow(m)
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
+	case pb.MessageType_MsgPropose:
+		return ErrProposalDropped
+	}
+	return nil
+}
+
 
 //handleRequestVoteResponse handle the case candidate receive a Request Vote
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
@@ -651,11 +743,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	if voteCount > sumPeer/2 {
 		//get agree half above , the node become leader and send heartbeat immediately
 		r.becomeLeader()
-		for peerId := uint64(1); peerId <= uint64(len(r.Prs)); peerId++ {
-			if peerId != r.id {
-				r.sendHeartbeat(peerId)
-			}
-		}
+		r.sendHeartbeat()
 	} else if rejectCount > sumPeer/2 {
 		//if reject half above, the candidate become follower immediately
 		r.becomeFollower(r.Term, None)
@@ -687,6 +775,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	lastTerm,_ := r.RaftLog.Term(lastIndex)
 
 	if lastIndex < meta.RaftInitLogIndex && lastTerm < meta.RaftInitLogTerm && len(r.Prs) == 0 {
+		log.Infof("Peer %d need snapshot.", r.id)
 		r.sendAppendResponse(m.From, lastTerm, lastIndex, true)
 		return
 	}
@@ -846,12 +935,12 @@ func (r *Raft) bcastAppend() {
 
 func (r *Raft) handleMsgAppendResponse(m pb.Message) {
 	log.Infof("MsgAppendResponse Term %d, Index %d logTerm %d commit %d",m.Term,m.Index,m.LogTerm,m.Commit)
-	if m.Term != None && m.Term < r.Term {
-		return
-	}
-	if m.Index < meta.RaftInitLogIndex && m.Term < meta.RaftInitLogTerm && m.Reject {
+	if m.Index < meta.RaftInitLogIndex && m.LogTerm < meta.RaftInitLogTerm && m.Reject {
 		log.Infof("Send snapshot to new node %d",m.From)
 		r.sendSnapshot(m.From)
+		return
+	}
+	if m.Term != None && m.Term < r.Term {
 		return
 	}
 	if m.Reject {
@@ -890,6 +979,7 @@ func (r *Raft) handleMsgAppendResponse(m pb.Message) {
 				panic(err)
 			}
 			if logTerm == r.Term {
+				log.Infof("Leader %d commit index to %d", r.id, n)
 				r.RaftLog.committed = n
 				for peer := range r.Prs {
 					if peer == r.id {
@@ -899,6 +989,9 @@ func (r *Raft) handleMsgAppendResponse(m pb.Message) {
 				}
 			}
 		}
+	}
+	if r.Prs[m.From].Match >= r.pendingSnapshotIndex && r.Prs[m.From].snapState == SnapshotSending {
+		r.Prs[m.From].snapState = SnapshotNoNeed
 	}
 	if m.From == r.leadTransferee && m.Index == r.RaftLog.LastIndex() && r.helpTransferee == true{
 		r.helpTransferee = false
@@ -970,14 +1063,25 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		return
 	}
 	metaData := m.Snapshot.Metadata
+	term,_ := r.RaftLog.Term(metaData.Term)
+	/*
 	if r.RaftLog.committed >= metaData.Index {
+	 */
+	if term == metaData.Term {
 		r.sendSnapshotResponse(m.From, r.RaftLog.committed)
 		return
 	}
 	r.Prs = make(map[uint64]*Progress)
+	r.isolates = make(map[uint64]bool)
+	// if node receive a snapshot, means this node is not a leader
+	// so reset the votes
+	r.votes = make(map[uint64]bool)
 	for _, peer := range metaData.ConfState.Nodes {
 		r.Prs[peer] = &Progress{}
+		r.isolates[peer] =false
+		r.votes[peer] = false
 	}
+	log.Infof("Peer %d receive the snapshot, committed,stabled,applied to %d", r.id, metaData.Index)
 	r.RaftLog.firstOffset = metaData.Index + 1
 	//fmt.Printf("\nfo %v\n", r.RaftLog.firstOffset)
 	r.RaftLog.committed = metaData.Index
@@ -1047,28 +1151,41 @@ func (r *Raft) checkNodeRemoved() bool {
 	return true
 }
 
+
+// checkIsolate check if the leader node is isolated by above n/2 nodes
+func (r *Raft) checkIsolate() bool {
+	sum := len(r.isolates)
+	// r.isolates[r.id] = true
+	counts := 0
+	for peer := range r.isolates {
+		if r.isolates[peer] == true {
+			counts++
+		}
+	}
+	if counts > sum / 2 {
+		return true
+	}
+	return false
+}
+
 //get the proper follower if current leader need to be removed
 func (r *Raft) GetProperFollower() uint64 {
 	if r.State != StateLeader {
+		log.Infof("%d Choose follower but not the leader!", r.id)
 		return 0
 	}
 	if len(r.Prs) <= 1 {
 		return 0
 	}
-	maxLogIdx := r.RaftLog.LastIndex()
-	var biggestId uint64
-	var biggestLog uint64
-	for id, pr := range r.Prs {
-		if id == r.id {
-			continue
-		}
-		if pr.Match == maxLogIdx {
-			return id
-		}
-		if pr.Match > biggestLog {
-			biggestLog = pr.Match
-			biggestId = id
+	maxMatch := uint64(0)
+	maxMatchID := uint64(0)
+	for peer := range r.Prs {
+		if peer != r.id {
+			if r.Prs[peer].Match >= maxMatch {
+				maxMatch = r.Prs[peer].Match
+				maxMatchID = peer
+			}
 		}
 	}
-	return biggestId
+	return maxMatchID
 }
