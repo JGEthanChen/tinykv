@@ -263,11 +263,11 @@ func (ps *PeerStorage) clearMeta(kvWB, raftWB *engine_util.WriteBatch) error {
 func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
 	oldStartKey, oldEndKey := ps.region.GetStartKey(), ps.region.GetEndKey()
 	newStartKey, newEndKey := newRegion.GetStartKey(), newRegion.GetEndKey()
-	// log.Infof("oldStartKey %s, oldEndKey %s, newStartKey %s, newEndKey %s", string(oldStartKey), string(oldEndKey), string(newStartKey), string(newEndKey))
+	log.Infof("oldStartKey %s, oldEndKey %s, newStartKey %s, newEndKey %s", string(oldStartKey), string(oldEndKey), string(newStartKey), string(newEndKey))
 	if bytes.Compare(oldStartKey, newStartKey) < 0 {
 		ps.clearRange(newRegion.Id, oldStartKey, newStartKey)
 	}
-	if bytes.Compare(newEndKey, oldEndKey) < 0 || len(oldEndKey) == 0 {
+	if bytes.Compare(newEndKey, oldEndKey) < 0 || (len(oldEndKey) == 0 && len(newEndKey) != 0) {
 		ps.clearRange(newRegion.Id, newEndKey, oldEndKey)
 	}
 }
@@ -345,8 +345,8 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), idx))
 		}
 
-		ps.raftState.LastIndex = entries[entrySize-1].GetIndex()
-		ps.raftState.LastTerm = entries[entrySize-1].GetTerm()
+		ps.raftState.LastIndex = entries[entrySize-1].Index
+		ps.raftState.LastTerm = entries[entrySize-1].Term
 
 	}
 
@@ -375,29 +375,29 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 
 	ps.snapState.StateType = snap.SnapState_Applying
-	if ps.raftState.LastIndex <  snapshot.Metadata.Index {
-		ps.raftState.LastIndex = snapshot.Metadata.Index
-		ps.raftState.LastTerm = snapshot.Metadata.Term
-	}
-	if ps.applyState.AppliedIndex < snapshot.Metadata.Index {
-		ps.applyState.AppliedIndex = snapshot.Metadata.Index
-	}
-	if ps.applyState.TruncatedState.Index < snapshot.Metadata.Index {
-		ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
-		ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
-	}
+	// if ps.raftState.LastIndex <  snapshot.Metadata.Index {
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	// }
+	// if ps.applyState.AppliedIndex < snapshot.Metadata.Index {
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	// }
+	// if ps.applyState.TruncatedState.Index < snapshot.Metadata.Index {
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+	// }
 
 	// kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.GetId()), ps.applyState)
 
 	snapRegion := snapData.GetRegion()
 	result := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
-	if !util.RegionEqual(ps.region, snapRegion) {
+	// if !util.RegionEqual(ps.region, snapRegion) {
 		//result.PrevRegion = ps.region
 		//result.Region = snapRegion
-		// ps.clearExtraData(snapRegion)
-		ps.region = snapRegion
+		//ps.clearExtraData(snapRegion)
+		ps.SetRegion(snapRegion)
 		meta.WriteRegionState(kvWB, snapRegion, rspb.PeerState_Normal)
-	}
+	// }
 
 	notifier := make(chan bool)
 	ps.regionSched <- &runner.RegionTaskApply{
@@ -432,6 +432,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			return applySnapResult,err
 		}
 	}
+
 	ps.Append(ready.Entries, raftWB)
 	if !raft.IsEmptyHardState(ready.HardState) {
 		ps.raftState.HardState = &eraftpb.HardState{
@@ -461,6 +462,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 
 
 	// fmt.Printf("region %d Cur last index %d, apply index %d\n", ps.region.Id, ps.raftState.LastIndex, ps.applyState.AppliedIndex)
+	// meta.WriteRegionState(kvWB, ps.region, rspb.PeerState_Normal)
 	kvWB.SetMeta(meta.ApplyStateKey(ps.region.GetId()), ps.applyState)
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
 	kvWB.WriteToDB(ps.Engines.Kv)

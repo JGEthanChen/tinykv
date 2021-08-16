@@ -215,7 +215,6 @@ func (h *proposalHandler) processSplit(msg *raft_cmdpb.RaftCmdRequest, entry pb.
 	// Means the split key should be in (start key, end key)
 	if err := util.CheckKeyInRegion(splitMsg.SplitKey, region); err != nil {//|| bytes.Compare(splitMsg.SplitKey, region.StartKey)  == 0 {
 		log.Infof("%s Key not in region! key %s, region %d", h.Tag, string(splitMsg.SplitKey), region.Id)
-		// TODO this case, should not return err resp?
 		h.bindError(err, cb, resp)
 		return
 	}
@@ -448,7 +447,7 @@ func (h *proposalHandler) processNormalRequest(msg *raft_cmdpb.RaftCmdRequest, e
 					cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 					return
 				}
-				// h.peerStorage.applyState.AppliedIndex = entry.Index
+				//h.peerStorage.applyState.AppliedIndex = entry.Index
 				//log.Infof("Process apply index %d", entry.Index)
 				//kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
 				//kvWb.WriteToDB(h.peerStorage.Engines.Kv)
@@ -509,7 +508,7 @@ func (h *proposalHandler) checkProposalCb(entry *pb.Entry) (*message.Callback,bo
 			return nil, false
 		} else {
 			// proposal not found
-			log.Infof("proposal not found", proposal.index)
+			// log.Infof("proposal not found", proposal.index)
 			break
 		}
 	}

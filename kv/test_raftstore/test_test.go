@@ -437,13 +437,11 @@ func TestPersistConcurrentUnreliable2B(t *testing.T) {
 	GenericTest(t, "2B", 5, true, true, false, -1, false, false)
 }
 
-// TODO: sometimes error
 func TestPersistPartition2B(t *testing.T) {
 	// Test: restarts, partitions, many clients (2B) ...
 	GenericTest(t, "2B", 5, false, true, true, -1, false, false)
 }
 
-//TODO: sometimes error
 func TestPersistPartitionUnreliable2B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, many clients (3A) ...
 	GenericTest(t, "2B", 5, true, true, true, -1, false, false)
@@ -532,7 +530,7 @@ func TestSnapshotUnreliableRecover2C(t *testing.T) {
 	GenericTest(t, "2C", 5, true, true, false, 100, false, false)
 }
 
-// TODO: sometimes error
+
 func TestSnapshotUnreliableRecoverConcurrentPartition2C(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, many clients (2C) ...
 	GenericTest(t, "2C", 5, true, true, true, 100, false, false)
