@@ -229,7 +229,7 @@ func (d *peerMsgHandler) proposeNormalRequest(msg *raft_cmdpb.RaftCmdRequest, cb
 		term: pTerm,
 		cb: cb,
 	})
-	//fmt.Printf("proposal term index %v %v", d.nextProposalIndex(),d.Term())
+	log.Infof("proposal term index %v %v", d.nextProposalIndex(),d.Term())
 }
 
 

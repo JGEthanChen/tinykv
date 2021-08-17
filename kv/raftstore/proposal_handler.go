@@ -407,17 +407,17 @@ func (h *proposalHandler) processNormalRequest(msg *raft_cmdpb.RaftCmdRequest, e
 			*/
 		}
 		kvWb.Reset()
-		if ok {
-			switch req.CmdType {
-			case raft_cmdpb.CmdType_Put:
-				kvWb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-				h.SizeDiffHint += uint64(len(req.Put.Key) + len(req.Put.Value) + len(req.Put.Cf))
-			case raft_cmdpb.CmdType_Delete:
-				kvWb.DeleteCF(req.Delete.Cf, req.Delete.Key)
-				h.SizeDiffHint -= uint64(len(req.Delete.Cf) + len(req.Delete.Key))
-			}
-			kvWb.WriteToDB(h.peerStorage.Engines.Kv)
+		//if ok {
+		switch req.CmdType {
+		case raft_cmdpb.CmdType_Put:
+			kvWb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+			h.SizeDiffHint += uint64(len(req.Put.Key) + len(req.Put.Value) + len(req.Put.Cf))
+		case raft_cmdpb.CmdType_Delete:
+			kvWb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+			h.SizeDiffHint -= uint64(len(req.Delete.Cf) + len(req.Delete.Key))
 		}
+		kvWb.WriteToDB(h.peerStorage.Engines.Kv)
+		//}
 		if cb != nil {
 			switch req.CmdType {
 			case raft_cmdpb.CmdType_Get:
@@ -447,10 +447,10 @@ func (h *proposalHandler) processNormalRequest(msg *raft_cmdpb.RaftCmdRequest, e
 					cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 					return
 				}
-				//h.peerStorage.applyState.AppliedIndex = entry.Index
+				h.peerStorage.applyState.AppliedIndex = entry.Index
 				//log.Infof("Process apply index %d", entry.Index)
-				//kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
-				//kvWb.WriteToDB(h.peerStorage.Engines.Kv)
+				kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
+				kvWb.WriteToDB(h.peerStorage.Engines.Kv)
 				cb.Txn = h.peerStorage.Engines.Kv.NewTransaction(false)
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Snap,

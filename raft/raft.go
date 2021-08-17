@@ -788,11 +788,12 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 	// Reject the msg, if the msg is stale.
 	if m.Term != None && m.Term < r.Term {
+		log.Infof("Peer %d reject the append because leader is stale, follower term %d, but leader term %d",r.id, r.Term, m.Term)
 		r.sendAppendResponse(m.From,None,None,true)
 		return
 	}
 
-	// Receive the leader append message,
+	// Receive the leader append message, and reset the state.
 	if m.Term > r.Term || (m.Term == r.Term && r.State == StateCandidate){
 		r.becomeFollower(m.Term, m.From)
 	} else {
@@ -801,29 +802,22 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 
 
+	// Log not match, need logs before the m.Index.
 	if m.Index > lastIndex {
-		r.sendAppendResponse(m.From,None, lastIndex+1, true )
+		r.sendAppendResponse(m.From,None, lastIndex, true )
+		log.Infof("Peer %d reject the append because lack, follower index %d, but mIndex %d",r.id, lastIndex, m.Index)
 		return
 	}
 
 	logTerm,_ := r.RaftLog.Term(m.Index)
 	if logTerm != m.LogTerm {
-		matchIndex := r.RaftLog.findMatchIndex(m.Index, m.Term)
+		matchIndex := r.RaftLog.findMatchIndex(m.Index, logTerm)
 		r.sendAppendResponse(m.From,None,matchIndex, true)
+		// log.Infof("Peer %d reject the append because stale, matchIndex %d",r.id, matchIndex)
 		return
 	}
-	/*
-	if m.Index >= r.RaftLog.firstOffset {
-		lastTerm,_ := r.RaftLog.Term(m.Index)
-		if lastTerm != m.LogTerm && m.LogTerm != 0{
-			idx := int(m.Index - r.RaftLog.firstOffset+1)
-			i := sort.Search(idx, func(i int) bool { return r.RaftLog.entries[i].Term == lastTerm })
-			lastIndex := uint64(uint64(i) + r.RaftLog.firstOffset)
-			r.sendAppendResponse(m.From,lastTerm,lastIndex, true)
-			return
-		}
-	}
-	*/
+
+	// Follower choose to receive the append message
 	if len(r.RaftLog.entries) == 0 {
 		for _,entry := range m.Entries {
 			r.RaftLog.entries = append(r.RaftLog.entries, *entry)
@@ -831,9 +825,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	} else {
 		r.RaftLog.appendMatchEntries(m.Entries)
 	}
+	// Update the committed index, this index should be lower than leader
 	if m.Commit > r.RaftLog.committed {
 		r.RaftLog.committed = min(m.Commit, m.Index+uint64(len(m.Entries)))
 	}
+	log.Infof("Peer %d receive the append commit %d mIndex %d",r.id, r.RaftLog.committed, m.Index)
 	r.sendAppendResponse(m.From, None, r.RaftLog.LastIndex(),false)
 
 }
@@ -903,7 +899,7 @@ func (r *Raft) handleMsgPropose(m pb.Message) {
 	for idx, entry := range m.Entries {
 		entry.Term = r.Term
 		entry.Index = lastIndex + uint64(idx) +1
-		log.Infof("MsgPropose id:%v enrty: term index %v %v self index: %v\n",r.id, entry.Term,entry.Index,r.RaftLog.committed)
+		// log.Infof("MsgPropose id:%v enrty: term index %v %v self index: %v\n",r.id, entry.Term,entry.Index,r.RaftLog.committed)
 		if entry.EntryType == pb.EntryType_EntryConfChange {
 			if r.PendingConfIndex != None {
 				continue
@@ -926,35 +922,24 @@ func (r *Raft) handleMsgPropose(m pb.Message) {
 
 
 func (r *Raft) handleMsgAppendResponse(m pb.Message) {
-	log.Infof("HandleMsgAppendResponse Term %d, Index %d logTerm %d commit %d",m.Term,m.Index,m.LogTerm,m.Commit)
+	// log.Infof("HandleMsgAppendResponse Term %d, Index %d logTerm %d commit %d",m.Term,m.Index,m.LogTerm,m.Commit)
 	if m.Index < meta.RaftInitLogIndex && m.LogTerm < meta.RaftInitLogTerm && m.Reject {
-		log.Infof("Send snapshot to new node %d",m.From)
+		// log.Infof("Send snapshot to new node %d",m.From)
 		r.sendSnapshot(m.From)
 		return
 	}
 	if m.Term != None && m.Term < r.Term {
 		return
 	}
+
+	// If follower reject, means Next should update
 	if m.Reject {
-		/*
-		index := m.Index
-		if index == None {
-			return
-		}
-		if m.LogTerm != None {
-			logTerm := m.LogTerm
-			l := r.RaftLog
-			sliceIndex := sort.Search(len(l.entries),
-				func(i int) bool { return l.entries[i].Term > logTerm })
-			if sliceIndex > 0 && l.entries[sliceIndex-1].Term == logTerm {
-				index = uint64(sliceIndex) + l.firstOffset
-			}
-		}
-		*/
-		r.Prs[m.From].Next = m.Index
+		r.Prs[m.From].Next = m.Index + 1
 		r.sendAppend(m.From)
 		return
 	}
+	// If the follower receive the append,
+	// Leader should update its match index.
 	if m.Index > r.Prs[m.From].Match {
 		r.Prs[m.From].Match = m.Index
 		r.Prs[m.From].Next = m.Index + 1
@@ -963,7 +948,6 @@ func (r *Raft) handleMsgAppendResponse(m pb.Message) {
 			match = append(match, pr.Match)
 		}
 		sort.Sort(match)
-
 		matchIndex := match[(len(r.Prs)-1)/2]
 		matchTerm,_ := r.RaftLog.Term(matchIndex)
 		if matchIndex > r.RaftLog.committed && matchTerm == r.Term{
@@ -976,9 +960,12 @@ func (r *Raft) handleMsgAppendResponse(m pb.Message) {
 			}
 		}
 	}
+	// According comparing the match index, reset the snapshot state to the node.
 	if r.Prs[m.From].Match >= r.pendingSnapshotIndex && r.Prs[m.From].snapState == SnapshotSending {
+		r.pendingSnapshotIndex = 0
 		r.Prs[m.From].snapState = SnapshotNoNeed
 	}
+	// If the transferee log is up to date, then current Leader finish its job, then send msg timeout.
 	if m.From == r.leadTransferee && m.Index == r.RaftLog.LastIndex() && r.helpTransferee == true{
 		r.helpTransferee = false
 		msg := pb.Message{
@@ -1051,7 +1038,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		r.RaftLog.pendingSnapshot = m.Snapshot
 	} else {
 		// If the snapshot is stale, just return
-		log.Infof("Snapshot is stale, return.")
+		// log.Infof("Snapshot is stale, return.")
 		return
 	}
 
@@ -1174,3 +1161,4 @@ func (r *Raft) GetProperFollower() uint64 {
 	}
 	return maxMatchID
 }
+

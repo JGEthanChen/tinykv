@@ -15,7 +15,6 @@
 package raft
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -139,7 +138,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	if l.applied == l.committed {
 		return nil
 	}
-	log.Infof("nextents applied %d commited %d firstoffset %d", l.applied, l.committed, l.firstOffset)
+	// log.Infof("nextents applied %d commited %d firstoffset %d", l.applied, l.committed, l.firstOffset)
 	return l.entries[l.applied-l.firstOffset+1 : l.committed - l.firstOffset + 1]
 }
 
@@ -182,35 +181,27 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 
 func (l *RaftLog) findMatchIndex(last, logTerm uint64) uint64{
 	curIndex := min(l.LastIndex(), last)
-	for curIndex > l.committed {
+	for ;curIndex > l.committed; curIndex-- {
 		term, err := l.Term(curIndex)
 		if term != logTerm || err != nil {
 			break
 		}
-		curIndex--
 	}
 	return curIndex
 }
 
 func (l *RaftLog) appendMatchEntries(entries []*pb.Entry) {
 	for i, entry := range entries {
-		if entry.Index < l.firstOffset {
-			continue
-		}
-
-		if entry.Index <= l.LastIndex() {
-			logTerm, _ := l.Term(entry.Index)
-			if logTerm != entry.Term {
-				idx :=int(entry.Index - l.firstOffset)
-				l.entries[idx] = *entry
-				l.entries = l.entries[:idx+1]
-				l.stabled = min(l.stabled, entry.Index-1)
+		logTerm, err := l.Term(entry.Index)
+		if err != nil || logTerm != entry.Term {
+			idx := int(entry.Index-l.entries[0].Index)
+			l.entries = l.entries[:idx]
+			for j,ent := range entries {
+				if j >= i {
+					l.entries = append(l.entries, *ent)
+				}
 			}
-		} else {
-			for cur := i; cur < len(entries); cur++ {
-				l.entries = append(l.entries, *entries[cur])
-			}
-			break
+			l.stabled = min(l.stabled, entry.Index-1)
 		}
 	}
 }

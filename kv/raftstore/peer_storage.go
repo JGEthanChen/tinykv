@@ -123,7 +123,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	if len(buf) == int(high-low) {
 		return buf, nil
 	}
-	log.Infof("Entries not enough, got %d, want %d", len(buf), int(high-low))
+	// log.Infof("Entries not enough, got %d, want %d", len(buf), int(high-low))
 	// Here means we don't fetch enough entries.
 	return nil, raft.ErrUnavailable
 }
@@ -322,9 +322,9 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 			return err
 		}
 		// firstIndex,err := ps.FirstIndex()
-		if err != nil {
-			return err
-		}
+		//if err != nil {
+		//	return err
+		//}
 
 		/*
 		if ps.raftState.LastTerm == 0 && lastIndex == meta.RaftInitLogIndex && firstIndex == meta.RaftInitLogIndex+1 {
@@ -340,10 +340,12 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 			//}
 		}
 
+
 		//delete the log that will never be uploaded
 		for idx :=entries[entrySize-1].Index+1; idx<=lastIndex; idx++ {
 			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), idx))
 		}
+
 
 		ps.raftState.LastIndex = entries[entrySize-1].Index
 		ps.raftState.LastTerm = entries[entrySize-1].Term
