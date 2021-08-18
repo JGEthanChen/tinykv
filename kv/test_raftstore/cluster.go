@@ -56,12 +56,12 @@ func (c *Cluster) Start() {
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
 	//To avoid the huge log records in tmp, which is generating by pre test
-	_ = os.RemoveAll("./tmp")
-	_ = os.Mkdir("./tmp", 0755|os.ModeDir)
+	// _ = os.RemoveAll("./tmp")
+	// _ = os.Mkdir("./tmp", 0755|os.ModeDir)
 
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
-		//dbPath, err := ioutil.TempDir("", "test-raftstore")
-		dbPath, err := ioutil.TempDir("./tmp", "test-raftstore")
+		dbPath, err := ioutil.TempDir("", "test-raftstore")
+		//dbPath, err := ioutil.TempDir("./tmp", "test-raftstore")
 		if err != nil {
 			panic(err)
 		}

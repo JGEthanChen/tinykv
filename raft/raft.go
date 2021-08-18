@@ -317,10 +317,12 @@ func (r *Raft) sendSnapshot(to uint64) {
 		log.Infof("Peer %d Snapshot not ready.",r.id)
 		return
 	}
+	/*
 	if r.Prs[to].snapState == SnapshotSending {
 		// log.Infof("Peer %d Snapshot is sending",r.id)
 		return
 	}
+	*/
 	snap,err := r.RaftLog.storage.Snapshot()
 	if err != nil {
 		// log.Infof("Snapshot not available.")
@@ -823,7 +825,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 		}
 	} else {
-		r.RaftLog.appendMatchEntries(m.Entries)
+		r.RaftLog.Append(m.Entries)
 	}
 	// Update the committed index, this index should be lower than leader
 	if m.Commit > r.RaftLog.committed {

@@ -263,7 +263,7 @@ func (ps *PeerStorage) clearMeta(kvWB, raftWB *engine_util.WriteBatch) error {
 func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
 	oldStartKey, oldEndKey := ps.region.GetStartKey(), ps.region.GetEndKey()
 	newStartKey, newEndKey := newRegion.GetStartKey(), newRegion.GetEndKey()
-	log.Infof("oldStartKey %s, oldEndKey %s, newStartKey %s, newEndKey %s", string(oldStartKey), string(oldEndKey), string(newStartKey), string(newEndKey))
+	// log.Infof("oldStartKey %s, oldEndKey %s, newStartKey %s, newEndKey %s", string(oldStartKey), string(oldEndKey), string(newStartKey), string(newEndKey))
 	if bytes.Compare(oldStartKey, newStartKey) < 0 {
 		ps.clearRange(newRegion.Id, oldStartKey, newStartKey)
 	}
@@ -314,44 +314,27 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
-	//var err error
 	entrySize := len(entries)
 	if entrySize>0 {
 		lastIndex, err := ps.LastIndex()
 		if err != nil {
 			return err
 		}
-		// firstIndex,err := ps.FirstIndex()
-		//if err != nil {
-		//	return err
-		//}
 
-		/*
-		if ps.raftState.LastTerm == 0 && lastIndex == meta.RaftInitLogIndex && firstIndex == meta.RaftInitLogIndex+1 {
-			ps.raftState.LastIndex = entries[entrySize-1].GetIndex()
-			firstIndex = entries[0].Index
-		}
-
-		 */
-		//Append the entry after firstIndex
+		// Append the entry after firstIndex
 		for _, entry := range entries {
-			//if entry.Index >= firstIndex {
 			raftWB.SetMeta(meta.RaftLogKey(ps.region.GetId(),entry.Index), &entry)
-			//}
 		}
 
 
-		//delete the log that will never be uploaded
+		// Delete the log that will never be uploaded
 		for idx :=entries[entrySize-1].Index+1; idx<=lastIndex; idx++ {
 			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), idx))
 		}
-
-
 		ps.raftState.LastIndex = entries[entrySize-1].Index
 		ps.raftState.LastTerm = entries[entrySize-1].Term
 
 	}
-
 	return nil
 }
 
@@ -444,27 +427,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		}
 	}
 
-	/*
-	if len(ready.Entries) > 0 {
-		lastEntry := ready.Entries[len(ready.Entries) - 1]
-		// Last index need to refresh
-		if lastEntry.Index >= ps.raftState.LastIndex {
-			ps.raftState.LastTerm = lastEntry.Term
-			ps.raftState.LastIndex = lastEntry.Index
-		}
-	}
-	 */
 
-	/*
-	if len(ready.CommittedEntries) > 0 {
-		lastEntry := ready.CommittedEntries[len(ready.CommittedEntries) - 1]
-		ps.applyState.AppliedIndex = lastEntry.Index
-	}
-	 */
-
-
-	// fmt.Printf("region %d Cur last index %d, apply index %d\n", ps.region.Id, ps.raftState.LastIndex, ps.applyState.AppliedIndex)
-	// meta.WriteRegionState(kvWB, ps.region, rspb.PeerState_Normal)
 	kvWB.SetMeta(meta.ApplyStateKey(ps.region.GetId()), ps.applyState)
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
 	kvWB.WriteToDB(ps.Engines.Kv)
