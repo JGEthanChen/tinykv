@@ -72,11 +72,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 
 	rd := d.RaftGroup.Ready()
-	if len(rd.CommittedEntries) != 0 {
-		log.Infof(" %s handle raft ready. commit msg first last commit index %d %d , last index %d", d.Tag, rd.CommittedEntries[0].Index,rd.CommittedEntries[len(rd.CommittedEntries)-1].Index, d.RaftGroup.Raft.RaftLog.LastIndex())
-	} else {
-		log.Infof(" %s handle raft ready. No commit entry", d.Tag)
-	}
 	applySnapRes,err := d.peerStorage.SaveReadyState(&rd)
 
 	if err != nil {
@@ -95,11 +90,10 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			d.ctx.storeMeta.Unlock()
 		}
 	}
-	log.Infof("raft ready messages len %d", len(rd.Messages))
+	// log.Infof("raft ready messages len %d", len(rd.Messages))
 	d.Send(d.ctx.trans, rd.Messages)
 	proposalHandler := newProposalHandler(d, rd.CommittedEntries)
 	proposalHandler.HandleProposal()
-	// d.proposals = nil
 	d.RaftGroup.Advance(rd)
 
 }
@@ -109,41 +103,23 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	switch msg.Type {
 	case message.MsgTypeRaftMessage:
 		raftMsg := msg.Data.(*rspb.RaftMessage)
-//		log.Infof(" %s handle raft message %s from %d to %d, MsgType: %v" ,
-//				d.Tag, raftMsg.GetMessage().GetMsgType(), raftMsg.GetFromPeer().GetId(), raftMsg.GetToPeer().GetId(),raftMsg.Message.MsgType)
 		if err := d.onRaftMsg(raftMsg); err != nil {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
 	case message.MsgTypeRaftCmd:
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
-		log.Infof(" %s handle raft command, peer %d store %d cmdType: %s.", d.Tag, raftCMD.Request.Header.Peer.Id, raftCMD.Request.Header.Peer.StoreId, util.GetRequestType(raftCMD.Request))
-		if raftCMD.Request != nil && raftCMD.Request.Requests != nil{
-			for _,req := range raftCMD.Request.Requests {
-				switch req.CmdType {
-				case raft_cmdpb.CmdType_Put:
-					log.Infof("%s propose msg type put key %s", d.Tag, string(req.Put.Key))
-				case raft_cmdpb.CmdType_Delete:
-					log.Infof("%s propose msg type delete key %s", d.Tag, string(req.Delete.Key))
-				}
-
-			}
-		}
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
-		log.Infof(" %s Tick message.\n",d.Tag)
 		d.onTick()
 	case message.MsgTypeSplitRegion:
 		split := msg.Data.(*message.MsgSplitRegion)
-		log.Infof("%s on split with %v", d.Tag, split.SplitKey)
 		d.onPrepareSplitRegion(split.RegionEpoch, split.SplitKey, split.Callback)
 	case message.MsgTypeRegionApproximateSize:
 		d.onApproximateRegionSize(msg.Data.(uint64))
 	case message.MsgTypeGcSnap:
-		log.Infof(" %s RaftCmd: %v Peerid: %v\n",d.Tag, d.Meta.Id, d.Meta.Id)
 		gcSnap := msg.Data.(*message.MsgGCSnap)
 		d.onGCSnap(gcSnap.Snaps)
 	case message.MsgTypeStart:
-		log.Infof(" %s Peer id: %d Message Start.\n",d.Tag, d.Meta.Id)
 		d.startTicker()
 	}
 }
@@ -151,7 +127,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) error {
 	// Check store_id, make sure that the msg is dispatched to the right place.
 	if err := util.CheckStoreID(req, d.storeID()); err != nil {
-		log.Infof("store not match")
+		log.Infof("%s %d store not match peer %d", d.Tag, d.storeID(),req.Header.Peer.Id, req.Header.Peer.StoreId)
 		return err
 	}
 
@@ -160,17 +136,17 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	leaderID := d.LeaderId()
 	if !d.IsLeader() {
 		leader := d.getPeerFromCache(leaderID)
-		log.Infof("not the leader")
+		// log.Infof("not the leader")
 		return &util.ErrNotLeader{RegionId: regionID, Leader: leader}
 	}
 	// peer_id must be the same as peer's.
 	if err := util.CheckPeerID(req, d.PeerId()); err != nil {
-		log.Infof("not the peer")
+		// log.Infof("not the peer")
 		return err
 	}
 	// Check whether the term is stale.
 	if err := util.CheckTerm(req, d.Term()); err != nil {
-		log.Infof("not the term")
+		// log.Infof("not the term")
 		return err
 	}
 //	log.Infof("Req region ver %d cf ver %d curRegion ver %d cf ver %d", req.Header.RegionEpoch.Version, req.Header.RegionEpoch.ConfVer, d.Region().RegionEpoch.Version, d.Region().RegionEpoch.ConfVer)
@@ -182,7 +158,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 		// updated.
 		siblingRegion := d.findSiblingRegion()
 		if siblingRegion != nil {
-			log.Infof(" %s find siblingRegion id %d, start key %s, end key %s", d.Tag, siblingRegion.Id, string(siblingRegion.StartKey), string(siblingRegion.EndKey))
+			// log.Infof(" %s find siblingRegion id %d, start key %s, end key %s", d.Tag, siblingRegion.Id, string(siblingRegion.StartKey), string(siblingRegion.EndKey))
 
 			errEpochNotMatching.Regions = append(errEpochNotMatching.Regions, siblingRegion)
 		}
@@ -197,15 +173,14 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 func (d *peerMsgHandler) proposeNormalRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	reqs := msg.Requests
 
-	//check the key in reqs
+	// check the key in reqs
 	if err := d.checkKeyInRequests(reqs);err != nil{
-		// log.Infof("not in requests")
 		cb.Done(ErrResp(err))
 		return
 
 	}
 
-	//check if the read and write only has one
+	// check if the read and write only has one
 	if err := d.checkSingleOption(reqs);err != nil {
 		panic(err)
 	}
@@ -218,7 +193,6 @@ func (d *peerMsgHandler) proposeNormalRequest(msg *raft_cmdpb.RaftCmdRequest, cb
 
 	pIndex := d.nextProposalIndex()
 	pTerm := d.Term()
-	// log.Infof("Propose normal request")
 	if err := d.RaftGroup.Propose(data); err != nil {
 		cb.Done(ErrResp(err))
 		return
@@ -229,7 +203,7 @@ func (d *peerMsgHandler) proposeNormalRequest(msg *raft_cmdpb.RaftCmdRequest, cb
 		term: pTerm,
 		cb: cb,
 	})
-	log.Infof("proposal term index %v %v", d.nextProposalIndex(),d.Term())
+	// log.Infof("proposal term index %v %v", d.nextProposalIndex(),d.Term())
 }
 
 
@@ -240,7 +214,6 @@ func (d *peerMsgHandler) proposeCompactLog(msg *raft_cmdpb.RaftCmdRequest, cb *m
 	if err != nil {
 		panic(err)
 	}
-
 	if err = d.RaftGroup.Propose(data);err != nil {
 		cb.Done(ErrResp(err))
 	}
@@ -330,8 +303,6 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 	case raft_cmdpb.AdminCmdType_Split:
 		d.proposeSplit(msg,cb)
 	}
-
-
 }
 
 
@@ -339,17 +310,14 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
-		log.Infof("pre failed")
 		cb.Done(ErrResp(err))
 		return
 	}
 	// Your Code Here (2B).
 	switch {
 	case msg.GetAdminRequest() != nil:
-
 		d.proposeAdminRequest(msg,cb)
 	case len(msg.Requests) > 0 :
-
 		d.proposeNormalRequest(msg,cb)
 	}
 
@@ -404,21 +372,21 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	log.Debugf ("%s handle raft message %s from %d to %d",
 		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
-		log.Infof("Raft Message %s not valid.",msg.GetMessage().GetMsgType())
+		// log.Infof("Raft Message %s not valid.",msg.GetMessage().GetMsgType())
 		return nil
 	}
 	if d.stopped {
-		log.Infof("Raft Message %s stop.",msg.GetMessage().GetMsgType())
+		// log.Infof("Raft Message %s stop.",msg.GetMessage().GetMsgType())
 		return nil
 	}
 	if msg.GetIsTombstone() {
-		log.Infof("Raft Message %s Tombstone.",msg.GetMessage().GetMsgType())
+		// log.Infof("Raft Message %s Tombstone.",msg.GetMessage().GetMsgType())
 		// we receive a message tells us to remove self.
 		d.handleGCPeerMsg(msg)
 		return nil
 	}
 	if d.checkMessage(msg) {
-		log.Infof("Raft Message %s Tombstone.",msg.GetMessage().GetMsgType())
+		// log.Infof("Raft Message %s Tombstone.",msg.GetMessage().GetMsgType())
 		return nil
 	}
 	key, err := d.checkSnapshot(msg)
@@ -430,7 +398,7 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 		// delete them here. If the snapshot file will be reused when
 		// receiving, then it will fail to pass the check again, so
 		// missing snapshot files should not be noticed.
-		log.Infof("Raft Message %s key is nil.",msg.GetMessage().GetMsgType())
+		// log.Infof("Raft Message %s key is nil.",msg.GetMessage().GetMsgType())
 		s, err1 := d.ctx.snapMgr.GetSnapshotForApplying(*key)
 		if err1 != nil {
 			return err1
@@ -611,7 +579,7 @@ func (d *peerMsgHandler) checkSnapshot(msg *rspb.RaftMessage) (*snap.SnapKey, er
 }
 
 func (d *peerMsgHandler) destroyPeer() {
-	log.Infof("%s starts destroy", d.Tag)
+	// log.Infof("%s starts destroy", d.Tag)
 	regionID := d.regionId
 	// We can't destroy a peer which is applying snapshot.
 	meta := d.ctx.storeMeta
@@ -767,7 +735,7 @@ func (d *peerMsgHandler) validateSplitRegion(epoch *metapb.RegionEpoch, splitKey
 
 	if !d.IsLeader() {
 		// region on this store is no longer leader, skipped.
-		log.Infof("%s not leader, skip", d.Tag)
+		//log.Infof("%s not leader, skip", d.Tag)
 		return &util.ErrNotLeader{
 			RegionId: d.regionId,
 			Leader:   d.getPeerFromCache(d.LeaderId()),
@@ -801,7 +769,7 @@ func (d *peerMsgHandler) onSchedulerHeartbeatTick() {
 	if !d.IsLeader() {
 		return
 	}
-	log.Infof(" %s is Cur leader, store %d, peers: %v", d.Tag, d.storeID(), d.Region().Peers)
+	// log.Infof(" %s is Cur leader, store %d, peers: %v", d.Tag, d.storeID(), d.Region().Peers)
 	d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
 }
 

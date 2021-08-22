@@ -91,19 +91,17 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 
 	for i := 0; i < len(sources); i++ {
 		source := sources[i]
-		sourceID := source.GetID()
-		log.Infof("Try transfer store: %d", sourceID)
 		// Check if the source is available
 		if !source.IsAvailable() {
-			return nil
+			continue
 		}
 		// If the source is not up, pick next
 		if !source.IsUp() {
-			return nil
+			continue
 		}
 		// Check if the time last from lastHeartbeat above MinInterval
 		if time.Now().Sub(source.GetLastHeartbeatTS()).Nanoseconds() > s.GetMinInterval().Nanoseconds() {
-			return nil
+			continue
 		}
 		// A suitable store's down time cannot be longer than MaxStoreDownTIme of the cluster
 		if source.DownTime() > cluster.GetMaxStoreDownTime() {

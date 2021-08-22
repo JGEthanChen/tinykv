@@ -16,7 +16,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
-	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 )
@@ -186,15 +185,14 @@ func (c *Cluster) AllocPeer(storeID uint64) *metapb.Peer {
 func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
 	startTime := time.Now()
 	for i := 0; i < 10 || time.Now().Sub(startTime) < timeout; i++ {
-		log.Infof("request times %d", i )
+		//log.Infof("request times %d", i )
 		region := c.GetRegion(key)
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
 		if resp == nil {
 			// it should be timeouted innerly
-			log.Infof("Request time out!")
-			fmt.Println("Request time out!")
+			// log.Infof("Request time out!")
 			SleepMS(100)
 			continue
 		}
@@ -228,7 +226,7 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
 			//Debugf
-			log.Infof("can't call command %s on leader %d of region %d\n", request.String(), leader.GetId(), regionID)
+			//log.Infof("can't call command %s on leader %d of region %d\n", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
 			if leader == newLeader {
 				region, _, err := c.schedulerClient.GetRegionByID(context.TODO(), regionID)
@@ -238,25 +236,25 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 				peers := region.GetPeers()
 				leader = peers[rand.Int()%len(peers)]
 				//log.Debugf
-				log.Infof("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
-				fmt.Printf("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
+				//log.Infof("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
+				//fmt.Printf("leader info maybe wrong, use random leader %d of region %d\n", leader.GetId(), regionID)
 			} else {
 				leader = newLeader
-				log.Infof("use new leader %d of region %d\n", leader.GetId(), regionID)
-				fmt.Printf("use new leader %d of region %d\n", leader.GetId(), regionID)
+				// log.Infof("use new leader %d of region %d\n", leader.GetId(), regionID)
+				// fmt.Printf("use new leader %d of region %d\n", leader.GetId(), regionID)
 			}
 			continue
 		}
 		if resp.Header.Error != nil {
 			err := resp.Header.Error
 			if err.GetStaleCommand() != nil || err.GetEpochNotMatch() != nil || err.GetNotLeader() != nil {
-				log.Infof("encouter retryable err %+v", resp)
+				// log.Infof("encouter retryable err %+v", resp)
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
-					log.Infof("Get New leader %d", err.GetNotLeader().Leader)
+					// log.Infof("Get New leader %d", err.GetNotLeader().Leader)
 					leader = err.GetNotLeader().Leader
 				} else {
 					leader = c.LeaderOfRegion(regionID)
-					log.Infof("Use region info leader %d", leader)
+					// log.Infof("Use region info leader %d", leader)
 				}
 				continue
 			}

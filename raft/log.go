@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"fmt"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -71,6 +72,7 @@ func newLog(storage Storage) *RaftLog {
 
 	entries,err := storage.Entries(firstIndex, lastIndex+1) //begin with the entry persisted in storage
 	if err != nil {
+		fmt.Printf("firstIndex %d, lastIndex %d", firstIndex, lastIndex)
 		panic(err)
 	}
 

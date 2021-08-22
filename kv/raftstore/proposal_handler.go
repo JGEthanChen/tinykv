@@ -38,8 +38,7 @@ func (h *proposalHandler)HandleProposal() {
 	}
 	kvWB := new(engine_util.WriteBatch)
 	for _,entry := range h.Entries {
-		log.Infof("%s process index %d term %d",h.Tag, entry.Index, entry.Term)
-
+		//log.Infof("%s process index %d term %d",h.Tag, entry.Index, entry.Term)
 		msg := &raft_cmdpb.RaftCmdRequest{}
 		if entry.GetData() == nil {
 			continue
@@ -64,7 +63,7 @@ func (h *proposalHandler)HandleProposal() {
 		if h.stopped == true {
 			continue
 		}
-		log.Infof(" %s Applied Index %d", h.Tag, entry.Index)
+		//log.Infof(" %s Applied Index %d", h.Tag, entry.Index)
 		h.peerStorage.applyState.AppliedIndex = entry.Index
 		kvWB.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
 		kvWB.WriteToDB(h.peerMsgHandler.peerStorage.Engines.Kv)
@@ -106,9 +105,7 @@ func (h *proposalHandler) processAddNode(confChange pb.ConfChange, resp *raft_cm
 	if cb != nil {
 		cb.Done(resp)
 	}
-	// log.Infof
 	log.Infof("%s region: %d, add Peer %d in peerCache.\n", h.Tag, h.regionId, changePeer.Id)
-	fmt.Printf("%s region: %d, add Peer %d in peerCache.\n", h.Tag, h.regionId, changePeer.Id)
 }
 
 // processRemoveNode process the remove node command in ConfChange
@@ -125,7 +122,6 @@ func (h *proposalHandler) processRemoveNode(confChange pb.ConfChange, resp *raft
 	removePeer := reqCMD.GetAdminRequest().GetChangePeer().GetPeer()
 	if util.RemovePeer(region, removePeer.GetStoreId()) == nil {
 		h.bindError(&util.ErrStaleCommand{}, cb, resp)
-		fmt.Printf("peer is already removed!\n")
 		return
 	}
 
@@ -136,8 +132,7 @@ func (h *proposalHandler) processRemoveNode(confChange pb.ConfChange, resp *raft
 		// refresh the region
 		h.setRegionWithLock(region)
 		h.destroyPeer()
-		//log.Infof
-		fmt.Printf("%s region %d peer %d remove itself already.\n", h.Tag, region.Id, removePeer.Id)
+		// log.Infof ("%s region %d peer %d remove itself already.\n", h.Tag, region.Id, removePeer.Id)
 	} else {
 		kvWB := new(engine_util.WriteBatch)
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
@@ -149,8 +144,7 @@ func (h *proposalHandler) processRemoveNode(confChange pb.ConfChange, resp *raft
 		if h.IsLeader() {
 			delete(h.PeersStartPendingTime, removePeer.Id)
 		}
-		log.Infof("%s region %d peer %d remove already.\n", h.Tag, region.Id, removePeer.Id)
-		fmt.Printf("%s region %d peer %d remove already.\n", h.Tag, region.Id, removePeer.Id)
+		// log.Infof("%s region %d peer %d remove already.\n", h.Tag, region.Id, removePeer.Id)
 	}
 	if cb != nil {
 		cb.Done(resp)
@@ -179,18 +173,22 @@ func (h *proposalHandler) processConfChange(entry pb.Entry) {
 	case pb.ConfChangeType_RemoveNode:
 		h.processRemoveNode(confChange, resp, cb)
 	}
-
+	// If remove itself, no need to apply in raft group
+	if h.stopped == true {
+		return
+	}
 	h.RaftGroup.ApplyConfChange(confChange)
 
 	if h.IsLeader() {
 		h.HeartbeatScheduler(h.ctx.schedulerTaskSender)
 	}
+	return
 }
 
 
 
 func (h *proposalHandler) processAdminRequest(msg *raft_cmdpb.RaftCmdRequest, entry pb.Entry) {
-	log.Infof("[Region: %d] %d store: %d apply admin msg: %v",msg.Header.RegionId,msg.Header.Peer.Id, msg.Header.Peer.StoreId, msg.AdminRequest.CmdType)
+	// log.Infof("%s store: %d apply admin msg: %v",h.Tag, msg.Header.Peer.StoreId, msg.AdminRequest.CmdType)
 	adReq := msg.AdminRequest
 
 	switch msg.AdminRequest.CmdType {
@@ -214,21 +212,21 @@ func (h *proposalHandler) processSplit(msg *raft_cmdpb.RaftCmdRequest, entry pb.
 	// If the split key is not in this region
 	// Means the split key should be in (start key, end key)
 	if err := util.CheckKeyInRegion(splitMsg.SplitKey, region); err != nil {//|| bytes.Compare(splitMsg.SplitKey, region.StartKey)  == 0 {
-		log.Infof("%s Key not in region! key %s, region %d", h.Tag, string(splitMsg.SplitKey), region.Id)
+		// log.Infof("%s Key not in region! key %s, region %d", h.Tag, string(splitMsg.SplitKey), region.Id)
 		h.bindError(err, cb, resp)
 		return
 	}
 
 	// peers not match
 	if len(splitMsg.NewPeerIds) != len(region.Peers) {
-		log.Infof("peer count not match in split msg")
+		// log.Infof("peer count not match in split msg")
 		err := fmt.Errorf("peer count not match in split msg")
 		h.bindError(err, cb, resp)
 		return
 	}
 	region.RegionEpoch.Version++
 	newRegion := h.createNewRegion(region, splitMsg)
-	log.Infof("Create new region ID %d, cur Region %d, split key %s", newRegion.Id, region.Id, string(splitMsg.SplitKey))
+	//log.Infof("Create new region ID %d, cur Region %d, split key %s", newRegion.Id, region.Id, string(splitMsg.SplitKey))
 	// prevRegion should adjust
 	region.EndKey = util.SafeCopy(splitMsg.SplitKey)
 	// persist into db
@@ -236,10 +234,8 @@ func (h *proposalHandler) processSplit(msg *raft_cmdpb.RaftCmdRequest, entry pb.
 	raftWB := new(engine_util.WriteBatch)
 	meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 	meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
-	writeInitialApplyState(kvWB, region.Id)
 	kvWB.WriteToDB(h.peerStorage.Engines.Kv)
 
-	writeInitialRaftState(raftWB, region.Id)
 	raftWB.WriteToDB(h.peerStorage.Engines.Raft)
 
 	resp.AdminResponse = &raft_cmdpb.AdminResponse{
@@ -275,12 +271,17 @@ func (h *proposalHandler) processSplit(msg *raft_cmdpb.RaftCmdRequest, entry pb.
 }
 
 func (h *proposalHandler) handlePendingVote(region *metapb.Region) {
-	for idx,m := range h.ctx.storeMeta.pendingVotes {
+	newPendingVotes := make([]*rspb.RaftMessage,0)
+	for _,m := range h.ctx.storeMeta.pendingVotes {
 		if m.ToPeer.Id == h.Meta.Id && m.ToPeer.StoreId == h.Meta.StoreId {
 			h.ctx.router.send(region.Id, message.Msg{Type: message.MsgTypeRaftMessage, Data: m})
-			h.ctx.storeMeta.pendingVotes = append(h.ctx.storeMeta.pendingVotes[:idx], h.ctx.storeMeta.pendingVotes[idx+1:]...)
+		} else {
+			newPendingVotes = append(newPendingVotes, m)
 		}
 	}
+	h.ctx.storeMeta.Lock()
+	h.ctx.storeMeta.pendingVotes = newPendingVotes
+	h.ctx.storeMeta.Unlock()
 }
 
 func (h *proposalHandler) createNewPeer(region *metapb.Region) *peer {
@@ -291,7 +292,7 @@ func (h *proposalHandler) createNewPeer(region *metapb.Region) *peer {
 	for _,peer := range region.Peers {
 		newPeer.insertPeerCache(peer)
 	}
-	log.Infof(" %s create peer %s", h.Tag, newPeer.Tag)
+	//log.Infof(" %s create peer %s", h.Tag, newPeer.Tag)
 	return newPeer
 }
 
@@ -302,6 +303,7 @@ func (h *proposalHandler) createNewRegion(region *metapb.Region, splitMsg *raft_
 			Id: splitMsg.GetNewPeerIds()[peerId],
 			StoreId: peer.GetStoreId(),
 		})
+		//log.Infof("Peer %d store %d",splitMsg.GetNewPeerIds()[peerId],peer.GetStoreId())
 	}
 	newRegion := &metapb.Region{
 		Id: splitMsg.GetNewRegionId(),
@@ -321,19 +323,19 @@ func(h *proposalHandler) processCompactLog(adReq *raft_cmdpb.AdminRequest, entry
 	compactLog := adReq.GetCompactLog()
 	kvWb := new(engine_util.WriteBatch)
 	truncatedSt := h.peerStorage.applyState.TruncatedState
-	//fmt.Printf("\ncompact log %v %v\n" , truncatedSt.Index, compactLog.CompactIndex)
+	// update the truncated state, if the truncated is old, then skip
 	if truncatedSt.Index <= compactLog.CompactIndex {
 		truncatedSt.Index = compactLog.CompactIndex
 		truncatedSt.Term = compactLog.CompactTerm
 		kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
 		kvWb.WriteToDB(h.peerStorage.Engines.Kv)
-		h.LastCompactedIdx = truncatedSt.Index + 1
 		h.ctx.raftLogGCTaskSender <- &runner.RaftLogGCTask{
 			RaftEngine: h.ctx.engine.Raft,
 			RegionID: h.regionId,
 			StartIdx: h.LastCompactedIdx,
-			EndIdx: h.LastCompactedIdx,
+			EndIdx: truncatedSt.Index + 1,
 		}
+		h.LastCompactedIdx = truncatedSt.Index + 1
 	}
 }
 func (h *proposalHandler) checkKeyInReq(req *raft_cmdpb.Request) error{
@@ -350,7 +352,7 @@ func (h *proposalHandler) checkKeyInReq(req *raft_cmdpb.Request) error{
 	if key != nil {
 		err := util.CheckKeyInRegion(key, h.Region())
 		if err != nil {
-			log.Infof(" %s key: %s not in region %d from %s to %s", h.Tag, string(key), h.regionId, string(h.Region().StartKey), string(h.Region().EndKey))
+			//log.Infof(" %s key: %s not in region %d from %s to %s", h.Tag, string(key), h.regionId, string(h.Region().StartKey), string(h.Region().EndKey))
 			return err
 		}
 	}
@@ -359,40 +361,14 @@ func (h *proposalHandler) checkKeyInReq(req *raft_cmdpb.Request) error{
 
 func (h *proposalHandler) processNormalRequest(msg *raft_cmdpb.RaftCmdRequest, entry *pb.Entry) {
 	reqs := msg.Requests
-	cb,ok := h.checkProposalCb(entry)
-	if ok == false {
-		log.Infof("Not ok.")
-	}
+	cb,_ := h.checkProposalCb(entry)
 
-
-
-	/*
-	// if the epoch not match because of split, skip with error
-	if msg.Header.RegionEpoch.Version != h.Region().RegionEpoch.Version {
-		log.Infof(" %s Normal request process region not match.", h.Tag)
-		if cb != nil {
-			cb.Done(ErrResp(&util.ErrEpochNotMatch{
-				Message: "Region epoch not match.",
-				Regions: []*metapb.Region{h.Region()},
-			}))
-		}
-		return
-	}
-	 */
-
-	/*
-	if err := h.checkKeyInRequests(reqs);err != nil {
-		if cb != nil {
-			cb.Done(ErrResp(err))
-		}
-		return
-	}
-	*/
 
 	kvWb := new(engine_util.WriteBatch)
 	resp := newCmdResp()
 	for _,req := range reqs {
-		//write command should be persisted first
+		// check if the request is alright in current region,
+		// and read request can try to process.
 		if err := h.checkKeyInReq(req); err != nil {
 			if req.CmdType == raft_cmdpb.CmdType_Put || req.CmdType == raft_cmdpb.CmdType_Delete {
 				if cb != nil {
@@ -400,14 +376,9 @@ func (h *proposalHandler) processNormalRequest(msg *raft_cmdpb.RaftCmdRequest, e
 				}
 				return
 			}
-			/*
-			else if req.CmdType == raft_cmdpb.CmdType_Get || req.CmdType == raft_cmdpb.CmdType_Snap {
-				continue
-			}
-			*/
 		}
 		kvWb.Reset()
-		//if ok {
+		//write command should be persisted first
 		switch req.CmdType {
 		case raft_cmdpb.CmdType_Put:
 			kvWb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
@@ -417,58 +388,45 @@ func (h *proposalHandler) processNormalRequest(msg *raft_cmdpb.RaftCmdRequest, e
 			h.SizeDiffHint -= uint64(len(req.Delete.Cf) + len(req.Delete.Key))
 		}
 		kvWb.WriteToDB(h.peerStorage.Engines.Kv)
-		//}
+
 		if cb != nil {
 			switch req.CmdType {
 			case raft_cmdpb.CmdType_Get:
-				log.Infof(" %s process Msg get, key: %v", h.Tag, req.Get.Key)
-				//h.peerStorage.applyState.AppliedIndex = entry.Index
-				//kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
+				//log.Infof(" %s process Msg get, key: %v", h.Tag, req.Get.Key)
 				val,_ := engine_util.GetCF(h.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Get,
 					Get: &raft_cmdpb.GetResponse{Value: val},
 				})
 			case raft_cmdpb.CmdType_Delete:
-				log.Infof(" %s process Msg delete, key: %s", h.Tag, string (req.Delete.Key))
+				// log.Infof(" %s process Msg delete, key: %s", h.Tag, string (req.Delete.Key))
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 				CmdType: raft_cmdpb.CmdType_Delete,
 				Delete: &raft_cmdpb.DeleteResponse{},
 				})
 			case raft_cmdpb.CmdType_Put:
-				log.Infof(" %s process Msg put, put key %s data: %s", h.Tag, string(req.Put.Key), string(req.Put.Value))
+				// log.Infof(" %s process Msg put, put key %s data: %s", h.Tag, string(req.Put.Key), string(req.Put.Value))
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Put,
 					Put: &raft_cmdpb.PutResponse{},
 				})
 			case raft_cmdpb.CmdType_Snap:
-				log.Infof(" %s process Msg snap.", h.Tag)
+				// log.Infof(" %s process Msg snap.", h.Tag)
 				if msg.Header.RegionEpoch.Version != h.Region().RegionEpoch.Version {
 					cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 					return
 				}
-				h.peerStorage.applyState.AppliedIndex = entry.Index
-				//log.Infof("Process apply index %d", entry.Index)
-				kvWb.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
-				kvWb.WriteToDB(h.peerStorage.Engines.Kv)
 				cb.Txn = h.peerStorage.Engines.Kv.NewTransaction(false)
 				resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 					CmdType: raft_cmdpb.CmdType_Snap,
 					Snap: &raft_cmdpb.SnapResponse{Region: h.Region()},
 				})
 			}
-			// kvWb.WriteToDB(h.peerStorage.Engines.Kv)
 		}
 	}
 	if cb != nil {
 		cb.Done(resp)
 	}
-	/*
-	kvWB := new(engine_util.WriteBatch)
-	h.peerStorage.applyState.AppliedIndex = h.Entries[len(h.Entries)-1].Index
-	kvWB.SetMeta(meta.ApplyStateKey(h.regionId), h.peerStorage.applyState)
-	kvWB.WriteToDB(h.peerStorage.Engines.Kv)
-	 */
 }
 
 func (h *proposalHandler) bindError(err error, cb *message.Callback, resp *raft_cmdpb.RaftCmdResponse) {
@@ -489,7 +447,7 @@ func (h *proposalHandler) notifyStale(entry pb.Entry) {
 func (h *proposalHandler) checkProposalCb(entry *pb.Entry) (*message.Callback,bool) {
 	for {
 		if len(h.proposals) == 0 {
-			log.Infof("%s no proposal.", h.Tag)
+			// log.Infof("%s no proposal.", h.Tag)
 			return nil, true
 		}
 		proposal := h.proposals[0]
@@ -500,7 +458,7 @@ func (h *proposalHandler) checkProposalCb(entry *pb.Entry) (*message.Callback,bo
 		} else if proposal.index == entry.Index {
 			h.proposals = h.proposals[1:]
 			if proposal.term == entry.Term {
-				log.Infof("find proposal, index:%d", proposal.index)
+				//log.Infof("find proposal, index:%d", proposal.index)
 				return proposal.cb,true
 			}
 			// if the term not equal, means the entry may be stale

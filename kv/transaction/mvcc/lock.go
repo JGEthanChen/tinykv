@@ -97,3 +97,26 @@ func AllLocksForTxn(txn *MvccTxn) ([]KlPair, error) {
 	}
 	return result, nil
 }
+
+// AllKeysInLocksForTxn return all keys in locks for the current transcation
+func AllKeysInLocksForTxn(txn *MvccTxn) ([][]byte, error) {
+	var result [][]byte
+	iter := txn.Reader.IterCF(engine_util.CfLock)
+	defer iter.Close()
+
+	for ; iter.Valid(); iter.Next() {
+		item := iter.Item()
+		val, err := item.Value()
+		if err != nil {
+			return nil, err
+		}
+		lock, err := ParseLock(val)
+		if err != nil {
+			return nil, err
+		}
+		if lock.Ts == txn.StartTS {
+			result = append(result, item.Key())
+		}
+	}
+	return result, nil
+}

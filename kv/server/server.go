@@ -194,26 +194,25 @@ func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcp
 	}
 	// check if the lock exists, and is locked by other transaction
 	if lock != nil && lock.IsLockedFor(req.Key, mvccTxn.StartTS, resp) {
-		return resp, nil
-	}
-
-	// get the value
-	value,err := mvccTxn.GetValue(req.Key)
-	if err != nil {
-		resp.RegionError = util.RaftstoreErrToPbError(err)
-		if len(resp.RegionError.Message) != 0 {
-			return nil, err
-		}
-		return resp, nil
-	}
-
-	// value not found
-	if value == nil {
-		resp.NotFound = true
+		resp.Error = &kvrpcpb.KeyError{Locked: lock.Info(req.Key)}
 	} else {
-		resp.Value = value
-	}
+		// get the value
+		value,err := mvccTxn.GetValue(req.Key)
+		if err != nil {
+			resp.RegionError = util.RaftstoreErrToPbError(err)
+			if len(resp.RegionError.Message) != 0 {
+				return nil, err
+			}
+			return resp, nil
+		}
 
+		// value not found
+		if value == nil {
+			resp.NotFound = true
+		} else {
+			resp.Value = value
+		}
+	}
 	return resp, nil
 }
 
@@ -236,14 +235,9 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 
 	mvccTxn := mvcc.NewMvccTxn(reader, req.StartVersion)
 
-	// Get all keys for latches in one time
-	var keys [][]byte
 
-	for _,m := range req.Mutations {
-		keys = append(keys, m.Key)
-	}
-	server.Latches.WaitForLatches(keys)
-	defer server.Latches.ReleaseLatches(keys)
+	server.waitForLatchesByMutations(req.Mutations)
+	defer server.ReleaseLatchesByMutations(req.Mutations)
 
 	// Loop check the lock and write
 	for _,m := range req.Mutations {
@@ -312,6 +306,7 @@ func (server *Server) KvPrewrite(_ context.Context, req *kvrpcpb.PrewriteRequest
 	}
 	return resp, nil
 }
+
 
 func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*kvrpcpb.CommitResponse, error) {
 	// Your Code Here (4B).
@@ -546,8 +541,6 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 
 		// locked by other transaction
 		if lock != nil && lock.Ts != mvccTxn.StartTS {
-			//resp.Error = &kvrpcpb.KeyError{Locked: lock.Info(key)}
-			//return resp, nil
 			mvccTxn.PutWrite(key, mvccTxn.StartTS, &mvcc.Write{
 				StartTS: req.StartVersion,
 				Kind: mvcc.WriteKindRollback,
@@ -566,17 +559,17 @@ func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollb
 			}
 
 			if w == nil {
-				// prewrite missing
+				// not commit successfully
 				mvccTxn.PutWrite(key, req.StartVersion, &mvcc.Write{
 					StartTS: req.StartVersion,
 					Kind:    mvcc.WriteKindRollback,
 				})
 			} else if w != nil  && w.Kind != mvcc.WriteKindRollback{
-				// case that write has already commit
+				// case that write should rollback, but not end in normal situation.
 				resp.Error = &kvrpcpb.KeyError{Abort: "Can't roll back a transaction that has already committed."}
 				return resp, nil
 			}
-
+			// other case that w != nil, means the transaction has already rollback
 		}
 
 		// roll back the value
@@ -622,7 +615,8 @@ func (server *Server) KvResolveLock(context context.Context, req *kvrpcpb.Resolv
 	}
 
 	mvccTxn := mvcc.NewMvccTxn(reader, req.StartVersion)
-	pairs, err := mvcc.AllLocksForTxn(mvccTxn)
+
+	keys, err := mvcc.AllKeysInLocksForTxn(mvccTxn)
 	if err != nil {
 		// change error into region error
 		resp.RegionError = util.RaftstoreErrToPbError(err)
@@ -632,11 +626,6 @@ func (server *Server) KvResolveLock(context context.Context, req *kvrpcpb.Resolv
 			return resp, err
 		}
 		return resp, nil
-	}
-
-	var keys [][]byte
-	for _,pair := range pairs {
-		keys = append(keys, pair.Key)
 	}
 
 	if req.CommitVersion == 0 {
@@ -668,6 +657,27 @@ func (server *Server) KvResolveLock(context context.Context, req *kvrpcpb.Resolv
 
 	return resp, nil
 }
+
+func (server *Server) waitForLatchesByMutations(mutations []*kvrpcpb.Mutation) {
+	// Get all keys for latches in one time
+	var keys [][]byte
+
+	for _,m := range mutations {
+		keys = append(keys, m.Key)
+	}
+	server.Latches.WaitForLatches(keys)
+}
+
+func (server *Server) ReleaseLatchesByMutations(mutations []*kvrpcpb.Mutation) {
+	// Get all keys for latches in one time
+	var keys [][]byte
+
+	for _,m := range mutations {
+		keys = append(keys, m.Key)
+	}
+	server.Latches.ReleaseLatches(keys)
+}
+
 
 // SQL push down commands.
 func (server *Server) Coprocessor(_ context.Context, req *coppb.Request) (*coppb.Response, error) {
